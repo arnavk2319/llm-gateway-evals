@@ -63,3 +63,79 @@ async def test_spans_attempts_policy_and_lineage_persist_in_postgres():
             assert ref is not None and ref.model_id == "mock/large" and ref.family == "mock-c"
     finally:
         await sink.close()
+
+
+async def test_api_keys_log_events_and_the_unified_stream_in_postgres():
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    from app.auth import generate_key, hash_key
+    from app.events import LogEvent
+
+    dsn = os.environ["TEST_DATABASE_URL"]
+    sink = PostgresSink(dsn)
+    await sink.open(migrate=True)
+    run = "run_pgk_" + uuid.uuid4().hex[:8]
+    kid = "key_" + uuid.uuid4().hex[:8]
+    key = generate_key()
+    try:
+        await sink.create_api_key({
+            "id": kid, "name": "pg-test", "key_prefix": key[:12], "key_hash": hash_key(key),
+            "allowed_models": ["mock/small", "mock/medium"], "rate_limit_per_min": 100,
+            "expires_at": datetime.now(timezone.utc) + timedelta(days=1),
+        })
+        async with make_gateway(sink_obj=sink, sink="postgres", database_url=dsn,
+                                auth="required", auth_cache_ttl_s=0) as (c, _):
+            ok = await c.post(
+                "/v1/chat/completions", json=chat("hello"),
+                headers={"authorization": f"Bearer {key}", "x-run-id": run,
+                         "x-mock-behavior": "mock/small=error_500"},
+            )
+            assert ok.status_code == 200 and ok.headers["x-gateway-model"] == "mock/medium"
+            bad = await c.post(
+                "/v1/chat/completions", json=chat("hello"),
+                headers={"authorization": "Bearer gw_live_wrong", "x-run-id": run},
+            )
+            assert bad.status_code == 401
+            await asyncio.sleep(0.2)  # last_used_at is touched in the background
+
+            rec = await sink.get_api_key(hash_key(key))
+            assert rec["last_used_at"] is not None and rec["allowed_models"] == ["mock/small", "mock/medium"]
+
+            async with sink._pool.connection() as conn:
+                cur = await conn.execute(
+                    "SELECT source, kind, severity, tags->>'model', tags->>'key' "
+                    "FROM log_stream WHERE run_id = %s ORDER BY ts", (run,)
+                )
+                rows = await cur.fetchall()
+            kinds = {r[1] for r in rows}
+            assert kinds == {"request", "attempt_failed", "fallback", "request_rejected"}
+            assert all(r[0] == "gateway" for r in rows)
+            assert [r for r in rows if r[1] == "attempt_failed"][0][3] == "mock/small"
+            assert [r for r in rows if r[1] == "request"][0][4] == "pg-test"
+
+            # the rejected call must not have created a span
+            async with sink._pool.connection() as conn:
+                cur = await conn.execute("SELECT count(*) FROM spans WHERE run_id = %s", (run,))
+                assert (await cur.fetchone())[0] == 1
+
+            # revocation takes effect (cache ttl is 0 here)
+            await sink.set_api_key_status(kid, "revoked")
+            r = await c.post("/v1/chat/completions", json=chat("x"),
+                             headers={"authorization": f"Bearer {key}"})
+            assert r.status_code == 401
+
+            # ingestion from outside is idempotent on (source, external_id)
+            ext = LogEvent(source="vercel", kind="runtime_log", severity="info", message="hello",
+                           external_id="vc_" + uuid.uuid4().hex, tags={"deployment": "dpl_1"})
+            await sink.write_logs([ext, ext])
+            async with sink._pool.connection() as conn:
+                cur = await conn.execute(
+                    "SELECT count(*) FROM log_events WHERE external_id = %s", (ext.external_id,)
+                )
+                assert (await cur.fetchone())[0] == 1
+    finally:
+        try:
+            await sink.close()  # the app already closed it; closing twice is harmless
+        except Exception:
+            pass

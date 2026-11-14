@@ -18,6 +18,8 @@ def normalize_usage(u: dict[str, Any] | None) -> dict[str, int]:
 
 
 def classify_status(code: int) -> str:
+    if code in (401, 403):
+        return "auth_error"
     if code == 429:
         return "rate_limit"
     if code in (408, 504):
@@ -74,6 +76,8 @@ class CallOutcome:
     body: dict[str, Any] | None = None
     stream: StreamHandle | None = None
     usage: dict[str, int] = field(default_factory=dict)
+    retry_after_s: float | None = None  # from a 429 Retry-After header
+    notes: list[str] = field(default_factory=list)  # e.g. provider key failover events
 
 
 class Provider(Protocol):

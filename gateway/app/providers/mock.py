@@ -67,6 +67,12 @@ class MockProvider:
         if behavior == "error_429":
             return CallOutcome(ok=False, status_code=429, error_class="rate_limit",
                                error_message="mock rate limited", latency_ms=lat)
+        if behavior == "error_429_ra":
+            return CallOutcome(ok=False, status_code=429, error_class="rate_limit",
+                               error_message="mock rate limited", latency_ms=lat, retry_after_s=2.0)
+        if behavior == "error_401":
+            return CallOutcome(ok=False, status_code=401, error_class="auth_error",
+                               error_message="mock invalid api key", latency_ms=lat)
         return None
 
     async def complete(

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .config import DATA_DIR, Settings
-from .events import SpanEvent
+from .events import LogEvent, SpanEvent
 
 log = logging.getLogger("gateway.sink")
 
@@ -16,12 +16,20 @@ class EventSink(Protocol):
     persists_policy: bool
 
     async def write_many(self, events: list[SpanEvent]) -> None: ...
+    async def write_logs(self, logs: list[LogEvent]) -> None: ...
     async def get_span_model(self, span_id: str) -> tuple[str, str] | None: ...
     async def load_active_policy(self) -> tuple[int, dict[str, Any]] | None: ...
     async def save_policy(
         self, body: dict[str, Any], status: str = "active", created_by: str = "manual",
         parent_version: int | None = None,
     ) -> int: ...
+    # API keys
+    async def get_api_key(self, key_hash: str) -> dict[str, Any] | None: ...
+    async def touch_api_key(self, key_id: str) -> None: ...
+    async def create_api_key(self, record: dict[str, Any]) -> None: ...
+    async def list_api_keys(self) -> list[dict[str, Any]]: ...
+    async def set_api_key_status(self, key_id: str, status: str) -> bool: ...
+    async def set_api_key_expiry(self, key_id: str, expires_at: datetime | None) -> bool: ...
     async def close(self) -> None: ...
 
 
@@ -29,6 +37,9 @@ class NullSink:
     persists_policy = False
 
     async def write_many(self, events: list[SpanEvent]) -> None:
+        return None
+
+    async def write_logs(self, logs: list[LogEvent]) -> None:
         return None
 
     async def get_span_model(self, span_id: str) -> tuple[str, str] | None:
@@ -40,6 +51,24 @@ class NullSink:
     async def save_policy(self, body, status="active", created_by="manual", parent_version=None) -> int:
         raise NotImplementedError
 
+    async def get_api_key(self, key_hash: str) -> dict[str, Any] | None:
+        return None
+
+    async def touch_api_key(self, key_id: str) -> None:
+        return None
+
+    async def create_api_key(self, record: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    async def list_api_keys(self) -> list[dict[str, Any]]:
+        return []
+
+    async def set_api_key_status(self, key_id: str, status: str) -> bool:
+        return False
+
+    async def set_api_key_expiry(self, key_id: str, expires_at: datetime | None) -> bool:
+        return False
+
     async def close(self) -> None:
         return None
 
@@ -49,15 +78,52 @@ class MemorySink(NullSink):
 
     def __init__(self, maxlen: int = 5000) -> None:
         self.events: deque[SpanEvent] = deque(maxlen=maxlen)
+        self.logs: deque[LogEvent] = deque(maxlen=maxlen)
+        self.api_keys: dict[str, dict[str, Any]] = {}  # key_hash -> record
 
     async def write_many(self, events: list[SpanEvent]) -> None:
         self.events.extend(events)
+
+    async def write_logs(self, logs: list[LogEvent]) -> None:
+        self.logs.extend(logs)
 
     async def get_span_model(self, span_id: str) -> tuple[str, str] | None:
         for e in reversed(self.events):
             if e.span_id == span_id and e.model and e.family:
                 return e.model, e.family
         return None
+
+    async def get_api_key(self, key_hash: str) -> dict[str, Any] | None:
+        rec = self.api_keys.get(key_hash)
+        return dict(rec) if rec else None
+
+    async def touch_api_key(self, key_id: str) -> None:
+        for rec in self.api_keys.values():
+            if rec["id"] == key_id:
+                rec["last_used_at"] = datetime.now(timezone.utc)
+
+    async def create_api_key(self, record: dict[str, Any]) -> None:
+        rec = {"status": "active", "allowed_models": None, "rate_limit_per_min": None,
+               "expires_at": None, "rotated_from": None, "last_used_at": None,
+               "created_at": datetime.now(timezone.utc), **record}
+        self.api_keys[rec["key_hash"]] = rec
+
+    async def list_api_keys(self) -> list[dict[str, Any]]:
+        return [dict(r) for r in self.api_keys.values()]
+
+    async def set_api_key_status(self, key_id: str, status: str) -> bool:
+        for rec in self.api_keys.values():
+            if rec["id"] == key_id:
+                rec["status"] = status
+                return True
+        return False
+
+    async def set_api_key_expiry(self, key_id: str, expires_at: datetime | None) -> bool:
+        for rec in self.api_keys.values():
+            if rec["id"] == key_id:
+                rec["expires_at"] = expires_at
+                return True
+        return False
 
 
 class PostgresSink:
@@ -77,6 +143,8 @@ class PostgresSink:
             sql = Path(DATA_DIR / "schema.sql").read_text(encoding="utf-8")
             async with self._pool.connection() as conn:
                 await conn.execute(sql)
+
+    # ---- spans / attempts ---------------------------------------------------
 
     async def write_many(self, events: list[SpanEvent]) -> None:
         from psycopg.types.json import Jsonb
@@ -131,6 +199,26 @@ class PostgresSink:
                             ),
                         )
 
+    async def write_logs(self, logs: list[LogEvent]) -> None:
+        from psycopg.types.json import Jsonb
+
+        if not logs:
+            return
+        async with self._pool.connection() as conn:
+            async with conn.transaction():
+                for e in logs:
+                    await conn.execute(
+                        """INSERT INTO log_events (ts, source, kind, severity, message, tags, run_id,
+                                                   span_id, trace_id, fingerprint, payload, external_id)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                           ON CONFLICT DO NOTHING""",
+                        (
+                            datetime.fromtimestamp(e.ts, tz=timezone.utc), e.source, e.kind, e.severity,
+                            e.message, Jsonb(e.tags), e.run_id, e.span_id, e.trace_id, e.fingerprint,
+                            Jsonb(e.payload) if e.payload is not None else None, e.external_id,
+                        ),
+                    )
+
     async def get_span_model(self, span_id: str) -> tuple[str, str] | None:
         async with self._pool.connection() as conn:
             cur = await conn.execute(
@@ -138,6 +226,8 @@ class PostgresSink:
             )
             row = await cur.fetchone()
         return (row[0], row[1]) if row else None
+
+    # ---- routing policy -----------------------------------------------------
 
     async def load_active_policy(self) -> tuple[int, dict[str, Any]] | None:
         async with self._pool.connection() as conn:
@@ -168,6 +258,54 @@ class PostgresSink:
                 )
                 row = await cur.fetchone()
         return row[0]
+
+    # ---- API keys -----------------------------------------------------------
+
+    async def get_api_key(self, key_hash: str) -> dict[str, Any] | None:
+        from psycopg.rows import dict_row
+
+        async with self._pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT * FROM api_keys WHERE key_hash = %s", (key_hash,))
+                return await cur.fetchone()
+
+    async def touch_api_key(self, key_id: str) -> None:
+        async with self._pool.connection() as conn:
+            await conn.execute("UPDATE api_keys SET last_used_at = now() WHERE id = %s", (key_id,))
+
+    async def create_api_key(self, record: dict[str, Any]) -> None:
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                """INSERT INTO api_keys (id, name, key_prefix, key_hash, status, allowed_models,
+                                         rate_limit_per_min, expires_at, rotated_from)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (
+                    record["id"], record["name"], record["key_prefix"], record["key_hash"],
+                    record.get("status", "active"), record.get("allowed_models"),
+                    record.get("rate_limit_per_min"), record.get("expires_at"), record.get("rotated_from"),
+                ),
+            )
+
+    async def list_api_keys(self) -> list[dict[str, Any]]:
+        from psycopg.rows import dict_row
+
+        async with self._pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT id, name, key_prefix, status, allowed_models, rate_limit_per_min, "
+                    "expires_at, rotated_from, created_at, last_used_at FROM api_keys ORDER BY created_at"
+                )
+                return await cur.fetchall()
+
+    async def set_api_key_status(self, key_id: str, status: str) -> bool:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute("UPDATE api_keys SET status = %s WHERE id = %s", (status, key_id))
+            return cur.rowcount > 0
+
+    async def set_api_key_expiry(self, key_id: str, expires_at: datetime | None) -> bool:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute("UPDATE api_keys SET expires_at = %s WHERE id = %s", (expires_at, key_id))
+            return cur.rowcount > 0
 
     async def close(self) -> None:
         await self._pool.close()

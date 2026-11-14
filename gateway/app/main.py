@@ -16,11 +16,14 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 from .config import ENV_FILES, Settings
-from .events import build_span_event
+from . import observability
+from .auth import Authenticator
+from .events import build_log_events, build_span_event
 from .graph.build import build_graph
 from .graph.nodes import Deps
 from .lineage import Lineage
 from .policy import PolicyStore
+from .providers.health import ProviderHealth
 from .providers.registry import ProviderRegistry
 from .schemas import ChatRequest
 from .sinks import EventSink, MemorySink, make_sink
@@ -71,23 +74,48 @@ async def _emit(
     error_class: str | None = None,
     latency_ms: float | None = None,
 ) -> None:
-    """Write the span (and any internal spans) to the event store. Never raises."""
+    """Write spans and tagged log events to the event store. Never raises."""
+    if latency_ms is None:
+        latency_ms = (time.monotonic() - state.get("started", time.monotonic())) * 1000
+    # Requests rejected before profiling (bad credential, validation) are log events only:
+    # anyone can send those, so they must not create spans or runs.
+    rejected = bool(state.get("error")) and not state.get("task_profile")
+
+    logs = []
     try:
-        if latency_ms is None:
-            latency_ms = (time.monotonic() - state.get("started", time.monotonic())) * 1000
-        events = [
-            build_span_event(
-                state, latency_ms=latency_ms, graph_ms=graph_ms, usage=usage,
-                completion_chars=completion_chars, status=status, error_class=error_class,
-            )
-        ] + list(state.get("internal_spans", []))
-        await rt.sink.write_many(events)
-    except Exception:
-        log.exception("failed to write events")
+        logs = build_log_events(state)
+        observability.report_logs(logs)  # alert-worthy ones go to Sentry; tags get the event id
+    except Exception as e:
+        log.exception("failed to build log events")
+        observability.capture("log event build failed", tags={"where": "emit"}, exc=e)
+
+    try:
+        if not rejected:
+            events = [
+                build_span_event(
+                    state, latency_ms=latency_ms, graph_ms=graph_ms, usage=usage,
+                    completion_chars=completion_chars, status=status, error_class=error_class,
+                )
+            ] + list(state.get("internal_spans", []))
+            await rt.sink.write_many(events)
+    except Exception as e:
+        log.exception("failed to write spans")
+        observability.capture("span write failed", tags={"where": "emit"}, exc=e)
+
+    try:
+        await rt.sink.write_logs(logs)
+    except Exception as e:
+        log.exception("failed to write log events")
+        observability.capture("log write failed", tags={"where": "emit"}, exc=e)
 
 
-def create_app(settings: Settings | None = None, sink: EventSink | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    sink: EventSink | None = None,
+    sentry_overrides: dict[str, Any] | None = None,
+) -> FastAPI:
     settings = settings or Settings()
+    observability.init_sentry(settings, **(sentry_overrides or {}))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -100,6 +128,8 @@ def create_app(settings: Settings | None = None, sink: EventSink | None = None) 
             policy_store=policy_store,
             registry=ProviderRegistry(client, settings),
             lineage=Lineage(sink_),
+            auth=Authenticator(settings, sink_),
+            health=ProviderHealth(),
         )
         app.state.rt = Runtime(
             settings=settings, sink=sink_, policy_store=policy_store, graph=build_graph(deps), deps=deps

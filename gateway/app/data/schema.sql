@@ -87,3 +87,75 @@ CREATE TABLE IF NOT EXISTS routing_policy (
   activated_at   timestamptz
 );
 CREATE UNIQUE INDEX IF NOT EXISTS routing_policy_one_active ON routing_policy ((status)) WHERE status = 'active';
+
+-- ---------------------------------------------------------------------------
+-- API keys (only a SHA-256 hash of each key is stored)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS api_keys (
+  id                 text PRIMARY KEY,
+  name               text NOT NULL,
+  key_prefix         text NOT NULL,            -- first characters, for display only
+  key_hash           text NOT NULL UNIQUE,
+  status             text NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
+  allowed_models     text[],                   -- NULL = every model
+  rate_limit_per_min integer,                  -- NULL = gateway default
+  expires_at         timestamptz,
+  rotated_from       text,
+  created_at         timestamptz NOT NULL DEFAULT now(),
+  last_used_at       timestamptz
+);
+CREATE INDEX IF NOT EXISTS api_keys_name_idx ON api_keys (name);
+
+-- ---------------------------------------------------------------------------
+-- Unified log stream: one normalized, tagged, timestamped record per event,
+-- from any source (gateway, vercel, neon, sentry, hooks).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS log_events (
+  id           bigserial PRIMARY KEY,
+  ts           timestamptz NOT NULL DEFAULT now(),   -- when it happened at the source
+  ingested_at  timestamptz NOT NULL DEFAULT now(),   -- when the gateway stored it
+  source       text NOT NULL,                        -- gateway | vercel | neon | sentry | hook
+  kind         text NOT NULL,                        -- attempt_failed | request_failed | runtime_log | deploy ...
+  severity     text NOT NULL CHECK (severity IN ('debug','info','warn','error','critical')),
+  message      text NOT NULL,
+  tags         jsonb NOT NULL DEFAULT '{}'::jsonb,   -- the dimensions you filter on
+  run_id       text,
+  span_id      text,
+  trace_id     text,
+  fingerprint  text,                                 -- groups repeats of the same problem
+  payload      jsonb,                                -- source-specific detail
+  external_id  text                                  -- source's own id, makes ingestion idempotent
+);
+CREATE INDEX IF NOT EXISTS log_events_ts_idx          ON log_events (ts DESC);
+CREATE INDEX IF NOT EXISTS log_events_source_ts_idx   ON log_events (source, ts DESC);
+CREATE INDEX IF NOT EXISTS log_events_severity_ts_idx ON log_events (severity, ts DESC);
+CREATE INDEX IF NOT EXISTS log_events_run_idx         ON log_events (run_id);
+CREATE INDEX IF NOT EXISTS log_events_span_idx        ON log_events (span_id);
+CREATE INDEX IF NOT EXISTS log_events_fingerprint_idx ON log_events (fingerprint);
+CREATE INDEX IF NOT EXISTS log_events_tags_idx        ON log_events USING gin (tags jsonb_path_ops);
+CREATE UNIQUE INDEX IF NOT EXISTS log_events_external_idx
+  ON log_events (source, external_id) WHERE external_id IS NOT NULL;
+
+-- The single place to read from: log events plus one 'request' row per span.
+CREATE OR REPLACE VIEW log_stream AS
+SELECT l.ts, l.source, l.kind, l.severity, l.message, l.tags, l.run_id, l.span_id,
+       l.trace_id, l.fingerprint, l.payload, 'log:' || l.id::text AS id
+FROM log_events l
+UNION ALL
+SELECT s.created_at, 'gateway', 'request',
+       CASE WHEN s.status = 'ok' THEN 'info' ELSE 'error' END,
+       coalesce(s.model, '-') || ' ' || s.status || coalesce(' (' || s.error_class || ')', ''),
+       jsonb_strip_nulls(jsonb_build_object(
+         'provider', s.provider, 'model', s.model, 'node_role', s.node_role,
+         'task_type', s.task_type, 'origin', s.origin, 'status', s.status,
+         'error_class', s.error_class, 'policy_version', s.policy_version,
+         'key', s.api_key_name, 'fell_back', s.fell_back)),
+       s.run_id, s.span_id, NULL::text, NULL::text,
+       jsonb_build_object(
+         'latency_ms', s.latency_ms, 'ttft_ms', s.ttft_ms,
+         'tokens', coalesce(s.prompt_tokens, 0) + coalesce(s.completion_tokens, 0),
+         'cost_usd', s.cost_usd, 'shadow_cost_usd', s.shadow_cost_usd,
+         'attempts', s.attempt_count, 'route_reason', s.route_reason,
+         'node_timings', s.node_timings),
+       'span:' || s.span_id
+FROM spans s;

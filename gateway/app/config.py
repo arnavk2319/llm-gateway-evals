@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -33,6 +34,31 @@ class Settings(BaseSettings):
     mock_latency_scale: float = 0.05
     debug_endpoints: bool = True
     idempotency_ttl_s: int = 300
+
+    # --- authentication
+    # auto: required when keys/JWT secret are configured or when running on Vercel.
+    auth: Literal["auto", "required", "off"] = "auto"
+    jwt_secret: str | None = None  # enables short-lived HS256 tokens minted by your backend
+    jwt_issuer: str | None = None
+    default_rate_limit_per_min: int = 0  # 0 = unlimited unless a key sets its own
+    auth_cache_ttl_s: float = 60.0  # how long a verified key is cached (bounds revocation lag)
+
+    # --- observability
+    sentry_dsn: str | None = Field(
+        default=None, validation_alias=AliasChoices("SENTRY_DSN", "GATEWAY_SENTRY_DSN")
+    )
+    sentry_traces_sample_rate: float = 0.0
+    environment: str = Field(
+        default="local", validation_alias=AliasChoices("VERCEL_ENV", "GATEWAY_ENVIRONMENT")
+    )
+
+    @property
+    def auth_required(self) -> bool:
+        if self.auth == "required":
+            return True
+        if self.auth == "off":
+            return False
+        return bool(self.api_keys or self.jwt_secret or os.environ.get("VERCEL"))
 
     @property
     def api_key_map(self) -> dict[str, str]:

@@ -47,14 +47,22 @@ def select_route(
     pinned: str | None = None,
     stream: bool = False,
     env: Mapping[str, str] | None = None,
+    allowed: set[str] | None = None,
+    unhealthy: set[str] | None = None,
 ) -> RouteDecision | None:
     """Pure routing function: capability filter, constraints, rank.
+
+    `allowed` restricts candidates to the models a caller's key may use.
+    `unhealthy` is the set of providers whose circuit is open; they are skipped
+    unless that would leave no candidate.
 
     Returns None when no candidate is left.
     """
     env = os.environ if env is None else env
     excluded = excluded or set()
     avail = policy.available_models(env)
+    if allowed is not None:
+        avail = [m for m in avail if m.id in allowed]
 
     if pinned:
         spec = next((m for m in avail if m.id == pinned), None)
@@ -66,6 +74,12 @@ def select_route(
     cands = [m for m in avail if m.id not in excluded and _capable(m, profile, stream)]
     if not cands:
         return None
+    if unhealthy:
+        healthy = [m for m in cands if m.provider not in unhealthy]
+        if healthy:
+            cands = healthy
+        else:
+            relaxed.append("circuit-open:ignored")
 
     tp = policy.task_policy(profile.task_type)
     want_tier = tp.min_tier + (1 if profile.complexity == "high" else 0) + escalate_tiers
