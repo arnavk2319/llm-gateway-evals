@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import json
 import logging
 import time
@@ -84,6 +86,8 @@ async def _emit(
     try:
         logs = build_log_events(state)
         observability.report_logs(logs)  # alert-worthy ones go to Sentry; tags get the event id
+        if rt.settings.emit_events_inline:
+            observability.flush()
     except Exception as e:
         log.exception("failed to build log events")
         observability.capture("log event build failed", tags={"where": "emit"}, exc=e)
@@ -248,17 +252,20 @@ def create_app(
             usage, chars = _usage_from_body(final["body"])
             if idem:
                 rt.idem[idem] = (time.monotonic() + settings.idempotency_ttl_s, final["body"], hdr)
-            return JSONResponse(
-                final["body"], status_code=200, headers=hdr,
-                background=BackgroundTask(_emit, rt, final_state, graph_ms=graph_ms, usage=usage,
-                                          completion_chars=chars),
-            )
+            emit = functools.partial(_emit, rt, final_state, graph_ms=graph_ms, usage=usage,
+                                     completion_chars=chars)
+            if settings.emit_events_inline:
+                await emit()
+                return JSONResponse(final["body"], status_code=200, headers=hdr)
+            return JSONResponse(final["body"], status_code=200, headers=hdr, background=BackgroundTask(emit))
 
         if final["kind"] == "error":
-            return JSONResponse(
-                final["body"], status_code=final["status"], headers=hdr,
-                background=BackgroundTask(_emit, rt, final_state, graph_ms=graph_ms),
-            )
+            emit = functools.partial(_emit, rt, final_state, graph_ms=graph_ms)
+            if settings.emit_events_inline:
+                await emit()
+                return JSONResponse(final["body"], status_code=final["status"], headers=hdr)
+            return JSONResponse(final["body"], status_code=final["status"], headers=hdr,
+                                background=BackgroundTask(emit))
 
         handle = final["handle"]
         outcome = {"status": "ok", "error_class": None}
@@ -293,6 +300,9 @@ def create_app(
                 task = asyncio.create_task(finalize())
                 rt.tasks.add(task)
                 task.add_done_callback(rt.tasks.discard)
+                if settings.emit_events_inline:  # keep the invocation alive until events are written
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.wait({task}, timeout=10)
 
         return StreamingResponse(body_iter(), media_type="text/event-stream", headers=hdr)
 

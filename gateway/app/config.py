@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     mock_control_with_auth: bool = False
     mock_latency_scale: float = 0.05
     debug_endpoints: bool = True
+    # Write events before the response is returned. Serverless platforms may freeze the
+    # process once the response is sent, which would drop post-response writes. auto = on Vercel.
+    emit_inline: Literal["auto", "on", "off"] = "auto"
     max_request_bytes: int = 1_048_576  # larger request bodies are rejected with 413
     idempotency_ttl_s: int = 300
 
@@ -54,6 +57,12 @@ class Settings(BaseSettings):
     environment: str = Field(
         default="local", validation_alias=AliasChoices("VERCEL_ENV", "GATEWAY_ENVIRONMENT")
     )
+
+    @property
+    def emit_events_inline(self) -> bool:
+        if self.emit_inline == "auto":
+            return bool(os.environ.get("VERCEL"))
+        return self.emit_inline == "on"
 
     @property
     def mock_control_enabled(self) -> bool:

@@ -134,16 +134,29 @@ class PostgresSink:
         from psycopg_pool import AsyncConnectionPool
 
         # prepare_threshold=None keeps this safe behind pgbouncer-style poolers (e.g. Neon).
+        # connect_timeout leaves room for a scaled-to-zero Neon compute to wake up.
         self._pool = AsyncConnectionPool(
-            dsn, min_size=1, max_size=5, open=False, kwargs={"prepare_threshold": None}
+            dsn, min_size=1, max_size=5, open=False,
+            kwargs={"prepare_threshold": None, "connect_timeout": 15},
         )
 
     async def open(self, migrate: bool = True) -> None:
         await self._pool.open()
         if migrate:
             sql = await asyncio.to_thread(Path(DATA_DIR / "schema.sql").read_text, encoding="utf-8")
-            async with self._pool.connection() as conn:
-                await conn.execute(sql)
+            for attempt in range(1, 4):
+                try:
+                    async with self._pool.connection() as conn, conn.transaction():
+                        # Serializes concurrent cold starts. The xact variant works behind
+                        # transaction-mode poolers (Neon's pooled endpoint), session locks do not.
+                        await conn.execute("SELECT pg_advisory_xact_lock(727274)")
+                        await conn.execute(sql)
+                    break
+                except Exception:
+                    if attempt == 3:
+                        raise
+                    log.warning("schema migration failed (attempt %d), retrying", attempt, exc_info=True)
+                    await asyncio.sleep(attempt)
 
     # ---- spans / attempts ---------------------------------------------------
 

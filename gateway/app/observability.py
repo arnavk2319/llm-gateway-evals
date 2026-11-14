@@ -93,6 +93,18 @@ def capture(
         return None
 
 
+def flush(timeout: float = 2.0) -> None:
+    """Deliver queued Sentry events now (serverless processes can be frozen right after a response)."""
+    if not sentry_active():
+        return
+    try:
+        import sentry_sdk
+
+        sentry_sdk.flush(timeout=timeout)
+    except Exception:
+        log.debug("sentry flush failed", exc_info=True)
+
+
 def report_logs(logs: list[LogEvent]) -> None:
     """Report the alert-worthy log events and stamp each with its Sentry event id."""
     if not sentry_active():
