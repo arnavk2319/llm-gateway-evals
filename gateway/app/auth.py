@@ -17,14 +17,17 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import math
 import secrets
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .config import Settings
+
+log = logging.getLogger("gateway.auth")
 
 KEY_PREFIX = "gw_live_"
 _NEGATIVE_TTL_S = 10.0
@@ -200,8 +203,8 @@ class Authenticator:
         exp = rec.get("expires_at")
         if exp is not None:
             if isinstance(exp, (int, float)):
-                exp = datetime.fromtimestamp(exp, tz=timezone.utc)
-            if exp <= datetime.now(timezone.utc):
+                exp = datetime.fromtimestamp(exp, tz=UTC)
+            if exp <= datetime.now(UTC):
                 raise AuthError(401, "invalid_token", "expired", error_class="key_expired")
         self._touch(rec["id"])
         return Principal(
@@ -241,8 +244,8 @@ class Authenticator:
     async def _safe_touch(self, key_id: str) -> None:
         try:
             await self._sink.touch_api_key(key_id)
-        except Exception:
-            pass
+        except Exception:  # last_used is best effort; never fail a request over it
+            log.debug("touch_api_key failed", exc_info=True)
 
     # -- rate limiting (token bucket, per instance)
 

@@ -1,11 +1,10 @@
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from conftest import chat, make_gateway, settle
 
 from app.auth import AuthError, generate_key, hash_key, mint_jwt, verify_jwt
-
-from conftest import chat, make_gateway, settle
 
 SECRET = "test-secret-at-least-32-bytes-long-xxxx"
 
@@ -51,7 +50,7 @@ async def test_missing_and_unknown_credentials_get_401_with_challenge():
 
 async def test_expired_and_revoked_keys_say_so():
     async with make_gateway(auth="required", auth_cache_ttl_s=0) as (c, sink):
-        old = await add_key(sink, "old", expires_at=datetime.now(timezone.utc) - timedelta(minutes=1))
+        old = await add_key(sink, "old", expires_at=datetime.now(UTC) - timedelta(minutes=1))
         r = await post(c, old)
         assert r.status_code == 401 and 'error_description="expired"' in r.headers["www-authenticate"]
 
@@ -168,7 +167,8 @@ def test_jwt_rejects_tampering_none_alg_wrong_issuer_and_garbage():
         with pytest.raises(AuthError):
             verify_jwt(bad, SECRET)
 
-    import base64, json
+    import base64
+    import json
 
     def b64(d):
         return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()

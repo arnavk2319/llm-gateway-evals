@@ -21,14 +21,14 @@ import asyncio
 import os
 import secrets
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dotenv import load_dotenv  # noqa: E402
+from dotenv import load_dotenv
 
-from app.config import ENV_FILES  # noqa: E402
+from app.config import ENV_FILES
 
 for _f in ENV_FILES:  # DATABASE_URL etc. from .env, like the gateway itself
     load_dotenv(_f)
@@ -88,7 +88,7 @@ async def main(argv: list[str]) -> int:
     try:
         if args.cmd == "create":
             models = [m.strip() for m in args.models.split(",") if m.strip()] if args.models else None
-            exp = datetime.now(timezone.utc) + timedelta(days=args.expires_days) if args.expires_days else None
+            exp = datetime.now(UTC) + timedelta(days=args.expires_days) if args.expires_days else None
             key, rec = _new_record(args.name, models=models, rate_limit=args.rate_limit, expires_at=exp)
             await sink.create_api_key(rec)
             _show_new_key(key, rec)
@@ -115,7 +115,7 @@ async def main(argv: list[str]) -> int:
             if old is None:
                 print("no such key")
                 return 1
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             exp = now + timedelta(days=args.expires_days) if args.expires_days else None
             key, rec = _new_record(
                 old["name"], models=old["allowed_models"], rate_limit=old["rate_limit_per_min"],

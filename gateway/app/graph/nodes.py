@@ -4,12 +4,14 @@ import asyncio
 import json
 import os
 import random
+import re
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any, Awaitable, Callable
+from typing import Any, cast
 
-from ..auth import AuthError, Authenticator
+from ..auth import Authenticator, AuthError
 from ..config import Settings
 from ..events import LogEvent, SpanEvent
 from ..lineage import Lineage
@@ -119,6 +121,15 @@ def c_outcome(state: GatewayState) -> str:
     return "update_context"
 
 
+_SAFE_ID = re.compile(r"[A-Za-z0-9_.:\-]{1,100}")
+
+
+def safe_id(value: str | None) -> str | None:
+    """Caller-supplied labels end up in logs, tags and dashboards: accept only short plain
+    identifiers so they cannot forge log lines, inject markup or blow up tag cardinality."""
+    return value if value and _SAFE_ID.fullmatch(value) else None
+
+
 # ---- nodes -----------------------------------------------------------------
 
 def make_nodes(deps: Deps) -> dict[str, Node]:
@@ -133,12 +144,12 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         model = (req.model or "auto").strip()
         update: dict[str, Any] = {
             "span_id": "call_" + uuid.uuid4().hex[:20],
-            "run_id": h.get("x-run-id") or "run_" + uuid.uuid4().hex[:16],
-            "node_role": h.get("x-node-role") or "unknown",
-            "parent_call_id": h.get("x-parent-call-id"),
-            "idempotency_key": h.get("idempotency-key"),
-            "task_hint": h.get("x-task-type"),
-            "quality_hint": h.get("x-quality-hint"),
+            "run_id": safe_id(h.get("x-run-id")) or "run_" + uuid.uuid4().hex[:16],
+            "node_role": safe_id(h.get("x-node-role")) or "unknown",
+            "parent_call_id": safe_id(h.get("x-parent-call-id")),
+            "idempotency_key": safe_id(h.get("idempotency-key")),
+            "task_hint": safe_id(h.get("x-task-type")),
+            "quality_hint": safe_id(h.get("x-quality-hint")),
             "origin": state.get("origin", "external"),
             "pinned": None if model in ("auto", "") or model.startswith("gateway/") else model,
             "allow_fallback": h.get("x-gateway-allow-fallback", "").lower() in ("1", "true"),
@@ -239,10 +250,10 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
             shadow_cost_usd=shadow,
             latency_ms=outcome.latency_ms,
         )
-        update: dict[str, Any] = {"internal_spans": state.get("internal_spans", []) + [span]}
+        update: dict[str, Any] = {"internal_spans": [*state.get("internal_spans", []), span]}
         if outcome.ok:
             try:
-                content = outcome.body["choices"][0]["message"]["content"]
+                content = (outcome.body or {})["choices"][0]["message"]["content"]
                 data = json.loads(content)
                 task = data.get("task_type")
                 cx = data.get("complexity")
@@ -260,7 +271,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
     async def route(state: GatewayState) -> dict[str, Any]:
         parent = None
         if state.get("parent_call_id"):
-            parent = await deps.lineage.get(state["parent_call_id"])
+            parent = await deps.lineage.get(str(state["parent_call_id"]))
         allowed = state.get("allowed_models")
         decision = select_route(
             state["policy"],
@@ -298,7 +309,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         remaining = state["deadline"] - time.monotonic()
         timeout = max(0.5, min(policy.retry.per_attempt_timeout_s, remaining))
         extra: dict[str, Any] = {}
-        if deps.settings.allow_mock_control:
+        if deps.settings.mock_control_enabled:
             extra["mock_behavior"] = parse_mock_behavior(state["headers"].get("x-mock-behavior"))
         try:
             if req.stream:
@@ -312,7 +323,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         return {"outcome": outcome}
 
     async def evaluate(state: GatewayState) -> dict[str, Any]:
-        o: CallOutcome = state["outcome"]
+        o = cast(CallOutcome, state["outcome"])
         sel = state["selected_route"].primary
         cls = "ok" if o.ok else (o.error_class or "internal")
         if o.ok and not state["request"].stream:
@@ -367,7 +378,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
             # A pinned model is retried in place, with jittered exponential backoff.
             n = len(state["attempts"])
             delay = min(policy.retry.backoff_base_s * (2 ** (n - 1)), policy.retry.backoff_max_s)
-            delay *= 0.5 + random.random() / 2
+            delay *= 0.5 + random.random() / 2  # noqa: S311 (backoff jitter, not security)
             retry_after = getattr(state.get("outcome"), "retry_after_s", None)
             if retry_after:
                 delay = max(delay, min(retry_after, policy.retry.backoff_max_s))
@@ -379,7 +390,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         return {"excluded_models": excluded, "escalate_tiers": esc}
 
     async def respond(state: GatewayState) -> dict[str, Any]:
-        o: CallOutcome = state["outcome"]
+        o = cast(CallOutcome, state["outcome"])
         sel = state["selected_route"].primary
         await deps.lineage.put(state["span_id"], sel.id, sel.family)
         hdr = _headers(state)

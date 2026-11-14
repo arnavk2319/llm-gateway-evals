@@ -13,7 +13,7 @@ async def run_plain(nodes: dict[str, Node], state: GatewayState) -> dict[str, An
     """
 
     async def step(name: str) -> None:
-        state.update(await nodes[name](state))  # type: ignore[arg-type]
+        state.update(await nodes[name](state))  # type: ignore[typeddict-item]
 
     await step("intake")
     if c_valid(state) == "respond_error":

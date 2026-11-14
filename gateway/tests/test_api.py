@@ -1,10 +1,10 @@
 import json
 
+from conftest import chat, make_gateway, settle, write_policy
+
 from app.graph.nodes import make_timed_nodes
 from app.graph.plain import run_plain
 from app.schemas import ChatRequest
-
-from conftest import chat, make_gateway, settle, write_policy
 
 
 async def test_basic_completion_routes_cheap_and_logs_event(gw):

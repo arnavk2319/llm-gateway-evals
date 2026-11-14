@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -15,9 +14,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
-from .config import ENV_FILES, Settings
 from . import observability
 from .auth import Authenticator
+from .config import ENV_FILES, Settings
 from .events import build_log_events, build_span_event
 from .graph.build import build_graph
 from .graph.nodes import Deps
@@ -95,8 +94,9 @@ async def _emit(
                 build_span_event(
                     state, latency_ms=latency_ms, graph_ms=graph_ms, usage=usage,
                     completion_chars=completion_chars, status=status, error_class=error_class,
-                )
-            ] + list(state.get("internal_spans", []))
+                ),
+                *state.get("internal_spans", []),
+            ]
             await rt.sink.write_many(events)
     except Exception as e:
         log.exception("failed to write spans")
@@ -107,6 +107,61 @@ async def _emit(
     except Exception as e:
         log.exception("failed to write log events")
         observability.capture("log write failed", tags={"where": "emit"}, exc=e)
+
+
+class BodyLimitMiddleware:
+    """Reject oversized request bodies before they are parsed (declared or streamed)."""
+
+    def __init__(self, app, max_bytes: int):
+        self.app, self.max_bytes = app, max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        declared = dict(scope["headers"]).get(b"content-length")
+        if declared and declared.isdigit() and int(declared) > self.max_bytes:
+            return await self._reject(scope, receive, send)
+
+        seen = 0
+        exceeded = False
+        started = False
+
+        async def limited_receive():
+            nonlocal seen, exceeded
+            msg = await receive()
+            if msg["type"] == "http.request":
+                seen += len(msg.get("body", b""))
+                if seen > self.max_bytes:
+                    exceeded = True
+                    raise _TooLarge
+            return msg
+
+        async def guarded_send(msg):
+            nonlocal started
+            if exceeded:  # the app may have turned the cut-off into its own 400: replace it
+                return
+            if msg["type"] == "http.response.start":
+                started = True
+            await send(msg)
+
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except _TooLarge:
+            pass
+        if exceeded and not started:
+            await self._reject(scope, receive, send)
+
+    async def _reject(self, scope, receive, send):
+        resp = JSONResponse(
+            {"error": {"message": f"request body exceeds {self.max_bytes} bytes",
+                       "type": "invalid_request_error", "code": "request_too_large"}},
+            status_code=413,
+        )
+        await resp(scope, receive, send)
+
+
+class _TooLarge(Exception):
+    pass
 
 
 def create_app(
@@ -139,6 +194,7 @@ def create_app(
         await sink_.close()
 
     app = FastAPI(title="LLM Gateway", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_bytes)
 
     @app.get("/healthz")
     async def healthz(request: Request):
@@ -156,7 +212,7 @@ def create_app(
         ]
         return {"object": "list", "data": data}
 
-    if settings.debug_endpoints:
+    if settings.debug_enabled:
 
         @app.get("/internal/policy")
         async def active_policy(request: Request):

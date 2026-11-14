@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from conftest import chat, make_gateway, write_policy
 
 from app.config import DATA_DIR
 from app.policy import Policy, load_policy_file
@@ -10,8 +11,6 @@ from app.profile import TaskProfile
 from app.providers.health import ProviderHealth
 from app.providers.openai_compat import OpenAICompatProvider
 from app.router import select_route
-
-from conftest import chat, make_gateway, settle, write_policy
 
 POLICY = load_policy_file(DATA_DIR / "seed_policy.yaml")
 SPEC = POLICY.models[0]

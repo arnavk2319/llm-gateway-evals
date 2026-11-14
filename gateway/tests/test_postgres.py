@@ -6,13 +6,13 @@
 
 import os
 import uuid
+from datetime import UTC
 
 import pytest
+from conftest import chat, make_gateway
 
 from app.lineage import Lineage
 from app.sinks import PostgresSink
-
-from conftest import chat, make_gateway
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL not set"
@@ -67,7 +67,7 @@ async def test_spans_attempts_policy_and_lineage_persist_in_postgres():
 
 async def test_api_keys_log_events_and_the_unified_stream_in_postgres():
     import asyncio
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from app.auth import generate_key, hash_key
     from app.events import LogEvent
@@ -82,10 +82,10 @@ async def test_api_keys_log_events_and_the_unified_stream_in_postgres():
         await sink.create_api_key({
             "id": kid, "name": "pg-test", "key_prefix": key[:12], "key_hash": hash_key(key),
             "allowed_models": ["mock/small", "mock/medium"], "rate_limit_per_min": 100,
-            "expires_at": datetime.now(timezone.utc) + timedelta(days=1),
+            "expires_at": datetime.now(UTC) + timedelta(days=1),
         })
         async with make_gateway(sink_obj=sink, sink="postgres", database_url=dsn,
-                                auth="required", auth_cache_ttl_s=0) as (c, _):
+                                auth="required", auth_cache_ttl_s=0, mock_control_with_auth=True) as (c, _):
             ok = await c.post(
                 "/v1/chat/completions", json=chat("hello"),
                 headers={"authorization": f"Bearer {key}", "x-run-id": run,

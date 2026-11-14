@@ -1,0 +1,4 @@
+# False positives in an earlier commit (already removed from the files). Neither value was a credential:
+# a throwaway key for the CI smoke test and a made-up canary string in a test.
+b2aa0c38f512ced1708b0fb5d11a2d2c53f5ce78:.github/workflows/ci.yml:curl-auth-header:104
+b2aa0c38f512ced1708b0fb5d11a2d2c53f5ce78:gateway/tests/test_security.py:generic-api-key:135
