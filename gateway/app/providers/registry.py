@@ -16,13 +16,14 @@ class ProviderRegistry:
         self._cache: dict[tuple, Provider] = {}
 
     def get(self, name: str, spec: ProviderSpec) -> Provider:
-        key = (name, spec.kind, spec.base_url, spec.api_key_env)
+        key = (name, spec.kind, spec.base_url, spec.api_key_env, spec.api_key_env_secondary)
         prov = self._cache.get(key)
         if prov is None:
             if spec.kind == "mock":
                 prov = MockProvider(self._settings.mock_latency_scale)
             else:
                 assert spec.base_url, f"provider {name} needs base_url"
-                prov = OpenAICompatProvider(name, spec.base_url, spec.api_key_env, self._client)
+                envs = [e for e in (spec.api_key_env, spec.api_key_env_secondary) if e]
+                prov = OpenAICompatProvider(name, spec.base_url, envs, self._client)
             self._cache[key] = prov
         return prov

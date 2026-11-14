@@ -8,6 +8,32 @@ from .pricing import compute_cost
 
 
 @dataclass
+class LogEvent:
+    """One normalized, tagged and timestamped log record, from any source.
+
+    `source` says where it came from (gateway, vercel, neon, sentry, hook), `kind` what it
+    is, and `tags` carry the dimensions you filter on. `run_id` / `span_id` correlate it with
+    the rest of an agent run. `external_id` makes ingestion from outside idempotent.
+    """
+
+    source: str
+    kind: str
+    severity: str  # debug | info | warn | error | critical
+    message: str
+    ts: float = field(default_factory=time.time)
+    tags: dict[str, Any] = field(default_factory=dict)
+    run_id: str | None = None
+    span_id: str | None = None
+    trace_id: str | None = None
+    fingerprint: str | None = None
+    payload: dict[str, Any] | None = None
+    external_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class AttemptEvent:
     attempt_no: int
     model: str | None
@@ -123,3 +149,83 @@ def build_span_event(
         api_key_name=state.get("api_key_name"),
         attempts=attempts,
     )
+
+
+def build_log_events(state: dict[str, Any]) -> list[LogEvent]:
+    """Tagged, stamped log events for everything noteworthy that happened to one request.
+
+    Successful requests are not duplicated here; they live in `spans` and are merged into
+    the same stream by the `log_stream` view.
+    """
+    run_id, span_id = state.get("run_id"), state.get("span_id")
+    prof = state.get("task_profile")
+    base = {
+        k: v
+        for k, v in {
+            "node_role": state.get("node_role"),
+            "task_type": prof.task_type if prof else None,
+            "policy_version": state.get("policy_version"),
+            "key": state.get("api_key_name"),
+            "env": state.get("environment"),
+        }.items()
+        if v is not None
+    }
+
+    out: list[LogEvent] = list(state.get("log_events", []))  # already stamped by the nodes
+    attempts = state.get("attempts", [])
+    for a in attempts:
+        if a["outcome_class"] == "ok":
+            continue
+        out.append(
+            LogEvent(
+                source="gateway",
+                kind="attempt_failed",
+                severity="error" if a["outcome_class"] == "auth_error" else "warn",
+                message=f"{a['model']} attempt {a['attempt_no']} failed: {a['outcome_class']}",
+                tags={**base, "provider": a["provider"], "model": a["model"],
+                      "error_class": a["outcome_class"], "attempt_no": a["attempt_no"]},
+                run_id=run_id,
+                span_id=span_id,
+                fingerprint=f"attempt:{a['provider']}:{a['outcome_class']}",
+                payload={"error": a["error"], "latency_ms": a["latency_ms"],
+                         "fallback_reason": a["fallback_reason"]},
+            )
+        )
+
+    final = state.get("final") or {}
+    sel = state.get("selected_route")
+    if final.get("kind") == "error":
+        body = (final.get("body") or {}).get("error", {})
+        ec = final.get("error_class")
+        rejected = not prof  # failed before the request was even profiled (auth, validation)
+        tags = {**base, "error_class": ec, "http_status": final.get("status")}
+        if sel:
+            tags["model"], tags["provider"] = sel.primary.id, sel.primary.provider
+        out.append(
+            LogEvent(
+                source="gateway",
+                kind="request_rejected" if rejected else "request_failed",
+                severity="warn" if rejected or final.get("status", 500) < 500 else "error",
+                message=f"{final.get('status')} {ec}: {body.get('message', '')}"[:300],
+                tags=tags,
+                run_id=run_id,
+                span_id=span_id,
+                fingerprint=f"{'rejected' if rejected else 'failed'}:{ec}:{tags.get('provider', '-')}",
+                payload={"attempts": body.get("attempts")},
+            )
+        )
+    elif len(attempts) > 1:
+        out.append(
+            LogEvent(
+                source="gateway",
+                kind="fallback",
+                severity="info",
+                message=f"served by {attempts[-1]['model']} after {len(attempts)} attempts",
+                tags={**base, "provider": attempts[-1]["provider"], "model": attempts[-1]["model"],
+                      "attempt_count": len(attempts)},
+                run_id=run_id,
+                span_id=span_id,
+                fingerprint=f"fallback:{attempts[0]['model']}",
+            )
+        )
+    return out

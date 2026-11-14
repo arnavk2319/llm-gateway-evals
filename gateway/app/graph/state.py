@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-from ..events import SpanEvent
+from ..events import LogEvent, SpanEvent
 from ..policy import Policy
 from ..profile import TaskProfile
 from ..providers.base import CallOutcome
@@ -27,6 +27,9 @@ class GatewayState(TypedDict, total=False):
     quality_hint: str | None
     pinned: str | None
     allow_fallback: bool
+    allowed_models: list[str] | None
+    auth_method: str
+    environment: str
 
     # policy
     policy: Policy
@@ -54,3 +57,4 @@ class GatewayState(TypedDict, total=False):
     # observability
     timings: dict[str, float]
     internal_spans: list[SpanEvent]
+    log_events: list[LogEvent]

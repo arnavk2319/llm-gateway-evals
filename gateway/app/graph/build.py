@@ -11,7 +11,7 @@ def build_graph(deps: Deps):
     nodes = make_timed_nodes(deps)
     g = StateGraph(GatewayState)
     for name, fn in nodes.items():
-        g.add_node(name, fn)
+        g.add_node(name, fn)  # type: ignore[call-overload]
 
     g.add_edge(START, "intake")
     g.add_conditional_edges("intake", c_valid, {"profile": "profile", "respond_error": "respond_error"})

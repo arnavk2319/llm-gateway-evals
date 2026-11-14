@@ -1,26 +1,32 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import random
+import re
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any, Awaitable, Callable
+from typing import Any, cast
 
+from ..auth import Authenticator, AuthError
 from ..config import Settings
-from ..events import SpanEvent
+from ..events import LogEvent, SpanEvent
 from ..lineage import Lineage
 from ..policy import PolicyStore
 from ..pricing import compute_cost
 from ..profile import COMPLEXITY, KNOWN_TASKS, TaskProfile, build_profile, last_user_text
 from ..providers.base import CallOutcome
+from ..providers.health import ProviderHealth
 from ..providers.registry import ProviderRegistry
 from ..router import select_route
 from .state import GatewayState
 
 # Outcome classes the in-request feedback loop may retry on another model.
 RETRYABLE = frozenset(
-    {"timeout", "rate_limit", "server_error", "connection", "malformed", "validator_failed"}
+    {"timeout", "rate_limit", "server_error", "connection", "malformed", "validator_failed", "auth_error"}
 )
 
 Node = Callable[[GatewayState], Awaitable[dict[str, Any]]]
@@ -32,6 +38,8 @@ class Deps:
     policy_store: PolicyStore
     registry: ProviderRegistry
     lineage: Lineage
+    auth: Authenticator
+    health: ProviderHealth
 
 
 def _err(status: int, type_: str, message: str, **extra: Any) -> dict[str, Any]:
@@ -103,6 +111,9 @@ def c_outcome(state: GatewayState) -> str:
         return "respond"
     if cls not in RETRYABLE:
         return "respond_error"
+    # A pinned model with a rejected key cannot be helped by retrying or falling back.
+    if cls == "auth_error" and state.get("pinned") and not state.get("allow_fallback"):
+        return "respond_error"
     if len(state["attempts"]) >= state["retry_budget"]:
         return "respond_error"
     if state["deadline"] - time.monotonic() < 0.25:
@@ -110,9 +121,22 @@ def c_outcome(state: GatewayState) -> str:
     return "update_context"
 
 
+_SAFE_ID = re.compile(r"[A-Za-z0-9_.:\-]{1,100}")
+
+
+def safe_id(value: str | None) -> str | None:
+    """Caller-supplied labels end up in logs, tags and dashboards: accept only short plain
+    identifiers so they cannot forge log lines, inject markup or blow up tag cardinality."""
+    return value if value and _SAFE_ID.fullmatch(value) else None
+
+
 # ---- nodes -----------------------------------------------------------------
 
 def make_nodes(deps: Deps) -> dict[str, Node]:
+    def stamped(state: GatewayState, kind: str, severity: str, message: str, **kw: Any) -> LogEvent:
+        return LogEvent(source="gateway", kind=kind, severity=severity, message=message,
+                        run_id=state.get("run_id"), span_id=state.get("span_id"), **kw)
+
     async def intake(state: GatewayState) -> dict[str, Any]:
         req, h = state["request"], state["headers"]
         now = time.monotonic()
@@ -120,12 +144,12 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         model = (req.model or "auto").strip()
         update: dict[str, Any] = {
             "span_id": "call_" + uuid.uuid4().hex[:20],
-            "run_id": h.get("x-run-id") or "run_" + uuid.uuid4().hex[:16],
-            "node_role": h.get("x-node-role") or "unknown",
-            "parent_call_id": h.get("x-parent-call-id"),
-            "idempotency_key": h.get("idempotency-key"),
-            "task_hint": h.get("x-task-type"),
-            "quality_hint": h.get("x-quality-hint"),
+            "run_id": safe_id(h.get("x-run-id")) or "run_" + uuid.uuid4().hex[:16],
+            "node_role": safe_id(h.get("x-node-role")) or "unknown",
+            "parent_call_id": safe_id(h.get("x-parent-call-id")),
+            "idempotency_key": safe_id(h.get("idempotency-key")),
+            "task_hint": safe_id(h.get("x-task-type")),
+            "quality_hint": safe_id(h.get("x-quality-hint")),
             "origin": state.get("origin", "external"),
             "pinned": None if model in ("auto", "") or model.startswith("gateway/") else model,
             "allow_fallback": h.get("x-gateway-allow-fallback", "").lower() in ("1", "true"),
@@ -139,19 +163,30 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
             "excluded_models": [],
             "escalate_tiers": 0,
             "internal_spans": [],
+            "log_events": [],
             "outcome": None,
             "error": None,
             "api_key_name": None,
+            "allowed_models": None,
+            "auth_method": "none",
+            "environment": deps.settings.environment,
         }
-        keys = deps.settings.api_key_map
-        if keys:
-            auth = h.get("authorization", "")
-            token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-            if token not in keys:
-                update["error"] = _err(401, "authentication_error", "Invalid or missing API key",
-                                       error_class="unauthorized")
-                return update
-            update["api_key_name"] = keys[token]
+        try:
+            principal = await deps.auth.authenticate(h.get("authorization"))
+        except AuthError as e:
+            update["error"] = _err(e.status, e.error, e.description, error_class=e.error_class,
+                                   headers=e.headers)
+            return update
+        if principal.auth_method != "none":
+            update["api_key_name"] = principal.name
+        update["auth_method"] = principal.auth_method
+        update["allowed_models"] = principal.allowed_models
+
+        if update["pinned"] and principal.allowed_models and update["pinned"] not in principal.allowed_models:
+            update["error"] = _err(403, "permission_error",
+                                   f"This credential may not use model {update['pinned']}",
+                                   error_class="forbidden_model")
+            return update
         if not req.messages:
             update["error"] = _err(400, "invalid_request_error", "messages must not be empty",
                                    error_class="invalid_request")
@@ -215,21 +250,20 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
             shadow_cost_usd=shadow,
             latency_ms=outcome.latency_ms,
         )
-        update: dict[str, Any] = {"internal_spans": state.get("internal_spans", []) + [span]}
+        update: dict[str, Any] = {"internal_spans": [*state.get("internal_spans", []), span]}
         if outcome.ok:
             try:
-                content = outcome.body["choices"][0]["message"]["content"]
+                content = (outcome.body or {})["choices"][0]["message"]["content"]
                 data = json.loads(content)
                 task = data.get("task_type")
                 cx = data.get("complexity")
-                new = replace(
+                update["task_profile"] = replace(
                     prof,
                     task_type=task if task in KNOWN_TASKS else prof.task_type,
                     complexity=cx if cx in COMPLEXITY else prof.complexity,
                     confidence=0.9,
                     source="llm",
                 )
-                update["task_profile"] = new
             except (KeyError, IndexError, TypeError, ValueError):
                 pass  # keep the rules profile
         return update
@@ -237,7 +271,8 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
     async def route(state: GatewayState) -> dict[str, Any]:
         parent = None
         if state.get("parent_call_id"):
-            parent = await deps.lineage.get(state["parent_call_id"])
+            parent = await deps.lineage.get(str(state["parent_call_id"]))
+        allowed = state.get("allowed_models")
         decision = select_route(
             state["policy"],
             state["task_profile"],
@@ -248,6 +283,8 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
             pinned=state.get("pinned"),
             stream=bool(state["request"].stream),
             env=os.environ,
+            allowed=set(allowed) if allowed else None,
+            unhealthy=deps.health.open_providers(),
         )
         if decision is None:
             attempts = state.get("attempts", [])
@@ -272,7 +309,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         remaining = state["deadline"] - time.monotonic()
         timeout = max(0.5, min(policy.retry.per_attempt_timeout_s, remaining))
         extra: dict[str, Any] = {}
-        if deps.settings.allow_mock_control:
+        if deps.settings.mock_control_enabled:
             extra["mock_behavior"] = parse_mock_behavior(state["headers"].get("x-mock-behavior"))
         try:
             if req.stream:
@@ -286,7 +323,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         return {"outcome": outcome}
 
     async def evaluate(state: GatewayState) -> dict[str, Any]:
-        o: CallOutcome = state["outcome"]
+        o = cast(CallOutcome, state["outcome"])
         sel = state["selected_route"].primary
         cls = "ok" if o.ok else (o.error_class or "internal")
         if o.ok and not state["request"].stream:
@@ -302,19 +339,58 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
             "error": (o.error_message or None) if cls != "ok" else None,
             "fallback_reason": prev,
         }
-        return {"outcome_class": cls, "attempts": state["attempts"] + [attempt]}
+
+        # Provider health: feeds the circuit breaker; surfaces key failover as log events.
+        new_logs: list[LogEvent] = []
+        opened = deps.health.record(sel.provider, cls, o.retry_after_s)
+        if opened:
+            new_logs.append(stamped(
+                state, "circuit_opened", "error", f"circuit opened for {sel.provider}: {opened}",
+                tags={"provider": sel.provider, "error_class": cls, "reason": opened},
+                fingerprint=f"circuit:{sel.provider}"))
+        for note in o.notes:
+            new_logs.append(stamped(
+                state, "provider_key_failover", "warn", f"{sel.provider}: {note}",
+                tags={"provider": sel.provider, "model": sel.id},
+                fingerprint=f"key-failover:{sel.provider}"))
+
+        return {
+            "outcome_class": cls,
+            "attempts": state["attempts"] + [attempt],
+            "log_events": state.get("log_events", []) + new_logs,
+        }
 
     async def update_context(state: GatewayState) -> dict[str, Any]:
+        policy = state["policy"]
         sel = state["selected_route"].primary
         excluded = list(state["excluded_models"])
-        # A pinned model is retried in place; otherwise exclude what just failed.
-        if not state.get("pinned") and sel.id not in excluded:
-            excluded.append(sel.id)
-        esc = state.get("escalate_tiers", 0) + (1 if state["outcome_class"] == "validator_failed" else 0)
+        pinned = state.get("pinned")
+        cls = state["outcome_class"]
+
+        if not pinned:
+            # Exclude what just failed; a rejected key takes the whole provider with it.
+            doomed = (
+                [m.id for m in policy.models if m.provider == sel.provider]
+                if cls == "auth_error" else [sel.id]
+            )
+            excluded.extend(m for m in doomed if m not in excluded)
+        else:
+            # A pinned model is retried in place, with jittered exponential backoff.
+            n = len(state["attempts"])
+            delay = min(policy.retry.backoff_base_s * (2 ** (n - 1)), policy.retry.backoff_max_s)
+            delay *= 0.5 + random.random() / 2  # noqa: S311 (backoff jitter, not security)
+            retry_after = getattr(state.get("outcome"), "retry_after_s", None)
+            if retry_after:
+                delay = max(delay, min(retry_after, policy.retry.backoff_max_s))
+            delay = max(0.0, min(delay, state["deadline"] - time.monotonic() - 0.5))
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+        esc = state.get("escalate_tiers", 0) + (1 if cls == "validator_failed" else 0)
         return {"excluded_models": excluded, "escalate_tiers": esc}
 
     async def respond(state: GatewayState) -> dict[str, Any]:
-        o: CallOutcome = state["outcome"]
+        o = cast(CallOutcome, state["outcome"])
         sel = state["selected_route"].primary
         await deps.lineage.put(state["span_id"], sel.id, sel.family)
         hdr = _headers(state)
@@ -339,7 +415,8 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
             "code": err.get("error_class") or err["type"]}}
         if "attempts" in err:
             body["error"]["attempts"] = err["attempts"]
-        final = {"kind": "error", "status": err["status"], "body": body, "headers": _headers(state),
+        headers = {**_headers(state), **(err.get("headers") or {})}
+        final = {"kind": "error", "status": err["status"], "body": body, "headers": headers,
                  "error_class": err.get("error_class") or err["type"]}
         return {"final": final}
 

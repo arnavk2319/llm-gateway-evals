@@ -1,10 +1,10 @@
 import json
 
+from conftest import chat, make_gateway, settle, write_policy
+
 from app.graph.nodes import make_timed_nodes
 from app.graph.plain import run_plain
 from app.schemas import ChatRequest
-
-from conftest import chat, make_gateway, settle, write_policy
 
 
 async def test_basic_completion_routes_cheap_and_logs_event(gw):
@@ -135,7 +135,9 @@ async def test_auth_when_keys_configured():
         ok = await c.post("/v1/chat/completions", json=chat(), headers={"authorization": "Bearer k1"})
         assert ok.status_code == 200
         assert sink.events[-1].api_key_name == "alpha"
-        assert sink.events[0].error_class == "unauthorized"
+        # Rejected requests are log events only; they never create spans or runs.
+        assert len(sink.events) == 1
+        assert [l.kind for l in sink.logs] == ["request_rejected", "request_rejected"]
 
 
 async def test_empty_messages_is_a_400(gw):

@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -46,6 +47,8 @@ class ProviderSpec(BaseModel):
     kind: Literal["openai_compat", "mock"]
     base_url: str | None = None
     api_key_env: str | None = None
+    # Optional second key for zero-downtime rotation / failover on a 401 or 403.
+    api_key_env_secondary: str | None = None
     requires_env: list[str] = Field(default_factory=list)
     # Provider is hidden when any of these env vars is set (e.g. disable mock).
     disabled_if_env: list[str] = Field(default_factory=list)
@@ -71,6 +74,9 @@ class RetryPolicy(BaseModel):
     deadline_s: float = 30.0
     per_attempt_timeout_s: float = 20.0
     first_token_timeout_s: float = 15.0
+    # Backoff (with jitter) for in-place retries of a pinned model.
+    backoff_base_s: float = 0.2
+    backoff_max_s: float = 2.0
 
 
 class Weights(BaseModel):

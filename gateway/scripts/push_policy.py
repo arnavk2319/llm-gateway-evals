@@ -16,6 +16,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from dotenv import load_dotenv
+
+from app.config import ENV_FILES
+
+for _f in ENV_FILES:  # DATABASE_URL etc. from .env, like the gateway itself
+    load_dotenv(_f)
+
 from app.policy import load_policy_file  # noqa: E402
 from app.sinks import PostgresSink  # noqa: E402
 

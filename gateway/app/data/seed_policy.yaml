@@ -18,11 +18,13 @@ providers:
     kind: openai_compat
     base_url: https://api.groq.com/openai/v1
     api_key_env: GROQ_API_KEY
+    api_key_env_secondary: GROQ_API_KEY_2   # optional: rotation / failover
     requires_env: [GROQ_API_KEY]
   openrouter:
     kind: openai_compat
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
+    api_key_env_secondary: OPENROUTER_API_KEY_2
     requires_env: [OPENROUTER_API_KEY]
 
 models:
