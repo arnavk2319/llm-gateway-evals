@@ -87,7 +87,7 @@ def capture(
                 scope.set_context("gateway", extra)
             if exc is not None:
                 return sentry_sdk.capture_exception(exc)
-            return sentry_sdk.capture_message(message, level=level)
+            return sentry_sdk.capture_message(message, level=level)  # type: ignore[arg-type]
     except Exception:  # reporting must never break a request
         log.exception("sentry capture failed")
         return None

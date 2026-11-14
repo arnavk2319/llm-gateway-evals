@@ -4,7 +4,8 @@ import asyncio
 import json
 import time
 import uuid
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from ..policy import ModelSpec
 from .base import CallOutcome, StreamHandle

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 # Failures that say "this provider is unhealthy", as opposed to a bad request.
 _PROVIDER_FAILURES = frozenset({"server_error", "timeout", "connection"})

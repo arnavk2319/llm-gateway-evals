@@ -1,5 +1,5 @@
-from app.policy import load_policy_file
 from app.config import DATA_DIR
+from app.policy import load_policy_file
 from app.profile import TaskProfile
 from app.router import ParentRef, select_route
 

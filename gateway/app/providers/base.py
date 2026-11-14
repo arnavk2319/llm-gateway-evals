@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
+from typing import Any, Protocol
 
 from ..policy import ModelSpec
 

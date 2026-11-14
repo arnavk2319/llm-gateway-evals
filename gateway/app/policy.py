@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field

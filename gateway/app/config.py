@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     allow_mock_control: bool = True
     mock_latency_scale: float = 0.05
     debug_endpoints: bool = True
+    max_request_bytes: int = 1_048_576  # larger request bodies are rejected with 413
     idempotency_ttl_s: int = 300
 
     # --- authentication
@@ -51,6 +52,16 @@ class Settings(BaseSettings):
     environment: str = Field(
         default="local", validation_alias=AliasChoices("VERCEL_ENV", "GATEWAY_ENVIRONMENT")
     )
+
+    @property
+    def mock_control_enabled(self) -> bool:
+        """Callers may steer the mock provider with a header, but never on an authenticated gateway."""
+        return self.allow_mock_control and not self.auth_required
+
+    @property
+    def debug_enabled(self) -> bool:
+        """/internal/* endpoints expose the policy and raw events: local development only."""
+        return self.debug_endpoints and not self.auth_required
 
     @property
     def auth_required(self) -> bool:

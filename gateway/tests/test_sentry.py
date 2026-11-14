@@ -1,15 +1,13 @@
+import httpx
 import pytest
 import sentry_sdk
+from conftest import chat
 from sentry_sdk.transport import Transport
 
 from app import observability
 from app.config import Settings
 from app.main import create_app
 from app.sinks import MemorySink
-
-import httpx
-
-from conftest import chat
 
 
 @pytest.fixture(autouse=True)

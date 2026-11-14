@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -150,7 +151,7 @@ class OpenAICompatProvider:
         )
         try:
             resp = await asyncio.wait_for(self._client.send(req, stream=True), timeout=timeout_s)
-        except (httpx.TimeoutException, asyncio.TimeoutError):
+        except (TimeoutError, httpx.TimeoutException):
             return self._fail("timeout", None, "connect timed out", t0)
         except httpx.TransportError as e:
             return self._fail("connection", None, repr(e)[:200], t0)
@@ -174,7 +175,7 @@ class OpenAICompatProvider:
         except StopAsyncIteration:
             await resp.aclose()
             return self._fail("malformed", resp.status_code, "empty stream", t0)
-        except (asyncio.TimeoutError, httpx.TimeoutException):
+        except (TimeoutError, httpx.TimeoutException):
             await resp.aclose()
             return self._fail("timeout", resp.status_code, "no first token in time", t0)
         except httpx.TransportError as e:
