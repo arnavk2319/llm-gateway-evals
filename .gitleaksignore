@@ -2,3 +2,6 @@
 # a throwaway key for the CI smoke test and a made-up canary string in a test.
 b2aa0c38f512ced1708b0fb5d11a2d2c53f5ce78:.github/workflows/ci.yml:curl-auth-header:104
 b2aa0c38f512ced1708b0fb5d11a2d2c53f5ce78:gateway/tests/test_security.py:generic-api-key:135
+
+# Test-only JWT secret constant in an earlier commit; not a real credential.
+a3e9e7cb9303107c63a082b67bae5037d4536a1f:gateway/tests/test_auth.py:generic-api-key:10
