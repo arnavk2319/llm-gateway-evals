@@ -85,7 +85,7 @@ async def test_api_keys_log_events_and_the_unified_stream_in_postgres():
             "expires_at": datetime.now(UTC) + timedelta(days=1),
         })
         async with make_gateway(sink_obj=sink, sink="postgres", database_url=dsn,
-                                auth="required", auth_cache_ttl_s=0) as (c, _):
+                                auth="required", auth_cache_ttl_s=0, mock_control_with_auth=True) as (c, _):
             ok = await c.post(
                 "/v1/chat/completions", json=chat("hello"),
                 headers={"authorization": f"Bearer {key}", "x-run-id": run,

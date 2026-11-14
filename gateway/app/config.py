@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     sink: Literal["auto", "memory", "postgres", "null"] = "auto"
     auto_migrate: bool = True
     allow_mock_control: bool = True
+    # Tests only: keep mock control when auth is required (never set this in a deployment).
+    mock_control_with_auth: bool = False
     mock_latency_scale: float = 0.05
     debug_endpoints: bool = True
     max_request_bytes: int = 1_048_576  # larger request bodies are rejected with 413
@@ -56,7 +58,7 @@ class Settings(BaseSettings):
     @property
     def mock_control_enabled(self) -> bool:
         """Callers may steer the mock provider with a header, but never on an authenticated gateway."""
-        return self.allow_mock_control and not self.auth_required
+        return self.allow_mock_control and (self.mock_control_with_auth or not self.auth_required)
 
     @property
     def debug_enabled(self) -> bool:

@@ -47,14 +47,14 @@ jobs:
         image: postgres:16
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust # throwaway CI database, no password to leak
           POSTGRES_DB: gateway_test
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres -d gateway_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gateway_test
+      TEST_DATABASE_URL: postgresql://postgres@localhost:5432/gateway_test
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { persist-credentials: false }
@@ -86,16 +86,17 @@ jobs:
     defaults: { run: { working-directory: gateway } }
     env:
       GATEWAY_AUTH: required
-      GATEWAY_API_KEYS: ci-smoke-key:ci
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { persist-credentials: false }
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
-        with: { enable-cache: true, cache-dependency-glob: gateway/uv.lock }
+        with: { enable-cache: false } # a running server would hold the cache lock open
       - run: uv sync --no-dev
       - name: Start the gateway
         run: |
-          nohup uv run --no-dev uvicorn app.main:app --port 8000 > ../gateway.log 2>&1 &
+          KEY="smoke-$(openssl rand -hex 16)" # random per run: nothing key-like is committed
+          echo "SMOKE_KEY=$KEY" >> "$GITHUB_ENV"
+          GATEWAY_API_KEYS="$KEY:ci" nohup uv run --no-dev uvicorn app.main:app --port 8000 > ../gateway.log 2>&1 &
           for i in $(seq 1 30); do curl -fs localhost:8000/healthz >/dev/null && exit 0; sleep 1; done
           cat ../gateway.log; exit 1
       - name: Checks
@@ -104,12 +105,14 @@ jobs:
           code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
           [ "$(code localhost:8000/v1/chat/completions -H 'content-type: application/json' -d "$body")" = 401 ]
           [ "$(code localhost:8000/v1/chat/completions -H 'content-type: application/json' -H 'authorization: Bearer nope' -d "$body")" = 401 ]
-          [ "$(code localhost:8000/v1/chat/completions -H 'content-type: application/json' -H 'authorization: Bearer ci-smoke-key' -d "$body")" = 200 ]
+          [ "$(code localhost:8000/v1/chat/completions -H 'content-type: application/json' -H "authorization: Bearer $SMOKE_KEY" -d "$body")" = 200 ]
           [ "$(code localhost:8000/internal/policy)" = 404 ]
           head -c 2000000 /dev/zero | tr '\0' 'x' > big.txt
-          [ "$(code localhost:8000/v1/chat/completions -H 'content-type: application/json' -H 'authorization: Bearer ci-smoke-key' --data-binary @big.txt)" = 413 ]
+          [ "$(code localhost:8000/v1/chat/completions -H 'content-type: application/json' -H "authorization: Bearer $SMOKE_KEY" --data-binary @big.txt)" = 413 ]
       - if: failure()
         run: cat ../gateway.log
+      - if: always()
+        run: pkill -f "uvicorn app.main" || true
 
   # Required check: dashboard
   dashboard:

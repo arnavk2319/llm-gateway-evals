@@ -64,10 +64,13 @@ jobs:
         run: npm audit --audit-level=high
 
   # Pull requests only: block newly introduced vulnerable or disallowed-licence dependencies.
+  # Needs "Dependency graph" enabled (Settings > Advanced Security). Until then it cannot run,
+  # so it is advisory; remove continue-on-error once the graph is on.
   dependency-review:
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    continue-on-error: true
     permissions:
       contents: read
       pull-requests: write

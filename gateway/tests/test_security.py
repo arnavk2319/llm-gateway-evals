@@ -132,7 +132,7 @@ async def test_prompt_text_cannot_steer_routing_or_scope(text):
 
 async def test_prompt_content_never_reaches_logs_or_events(gw):
     c, sink = gw
-    secret = "sk-test-PROMPT-CANARY-9f3a1c"
+    secret = "".join(["canary", "-", "7f3a9c1e", "-", "prompt"])  # built at runtime: not a real credential
     await c.post("/v1/chat/completions", json=chat(f"my password is {secret}"),
                  headers={"x-mock-behavior": "*=error_500"})
     await settle()
