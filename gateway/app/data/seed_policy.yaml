@@ -1,0 +1,135 @@
+# Seed routing policy (phase 1: hand-written; phase 3: the control plane proposes new versions).
+#
+# Real model ids and list prices below are examples and change over time.
+# Verify them against each provider's docs before relying on them.
+
+version: 1
+status: active
+
+providers:
+  mock:
+    kind: mock
+    disabled_if_env: [GATEWAY_DISABLE_MOCK]
+  ollama:
+    kind: openai_compat
+    base_url: http://localhost:11434/v1
+    requires_env: [OLLAMA_ENABLED]
+  groq:
+    kind: openai_compat
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    requires_env: [GROQ_API_KEY]
+  openrouter:
+    kind: openai_compat
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    requires_env: [OPENROUTER_API_KEY]
+
+models:
+  # --- mock models: always available, deterministic, used by tests and demos
+  - id: mock/small
+    provider: mock
+    model: mock-small
+    family: mock-a
+    tier: 1
+    capabilities: {tools: true, json_mode: true, max_context: 16000}
+    price: {input_per_1m: 0.05, output_per_1m: 0.10}
+    latency_ms_p50: 300
+    quality: {default: 0.55, code: 0.45, extraction: 0.60}
+  - id: mock/medium
+    provider: mock
+    model: mock-medium
+    family: mock-b
+    tier: 2
+    capabilities: {tools: true, json_mode: true, max_context: 32000}
+    price: {input_per_1m: 0.30, output_per_1m: 0.60}
+    latency_ms_p50: 800
+    quality: {default: 0.72, code: 0.70, review: 0.74}
+  - id: mock/large
+    provider: mock
+    model: mock-large
+    family: mock-c
+    tier: 3
+    capabilities: {tools: true, json_mode: true, max_context: 64000}
+    price: {input_per_1m: 1.00, output_per_1m: 2.00}
+    latency_ms_p50: 1800
+    quality: {default: 0.88, code: 0.90, review: 0.90}
+
+  # --- open models (free tiers / local). Billed cost is 0; shadow cost uses list price.
+  - id: ollama/llama3.2-3b
+    provider: ollama
+    model: "llama3.2:3b"
+    family: llama
+    tier: 1
+    free: true
+    capabilities: {tools: true, json_mode: true, max_context: 8000}
+    price: {input_per_1m: 0.05, output_per_1m: 0.08}
+    latency_ms_p50: 1500
+    quality: {default: 0.50, code: 0.45}
+  - id: ollama/qwen2.5-7b
+    provider: ollama
+    model: "qwen2.5:7b"
+    family: qwen
+    tier: 2
+    free: true
+    capabilities: {tools: true, json_mode: true, max_context: 16000}
+    price: {input_per_1m: 0.10, output_per_1m: 0.15}
+    latency_ms_p50: 3000
+    quality: {default: 0.65, code: 0.70}
+  - id: groq/llama-3.1-8b
+    provider: groq
+    model: llama-3.1-8b-instant
+    family: llama
+    tier: 1
+    free: true
+    capabilities: {tools: true, json_mode: true, max_context: 32000}
+    price: {input_per_1m: 0.05, output_per_1m: 0.08}
+    latency_ms_p50: 250
+    quality: {default: 0.55, code: 0.50}
+  - id: groq/llama-3.3-70b
+    provider: groq
+    model: llama-3.3-70b-versatile
+    family: llama
+    tier: 3
+    free: true
+    capabilities: {tools: true, json_mode: true, max_context: 32000}
+    price: {input_per_1m: 0.59, output_per_1m: 0.79}
+    latency_ms_p50: 600
+    quality: {default: 0.85, code: 0.84, review: 0.86}
+  - id: openrouter/qwen-2.5-72b
+    provider: openrouter
+    model: "qwen/qwen-2.5-72b-instruct:free"
+    family: qwen
+    tier: 3
+    free: true
+    capabilities: {tools: true, json_mode: true, max_context: 32000}
+    price: {input_per_1m: 0.40, output_per_1m: 0.60}
+    latency_ms_p50: 1200
+    quality: {default: 0.84, code: 0.85, review: 0.85}
+
+task_policies:
+  default: {min_tier: 1}
+  chat: {min_tier: 1}
+  classification: {min_tier: 1}
+  extraction: {min_tier: 1}
+  summarization: {min_tier: 1}
+  code: {min_tier: 2}
+  agent_tool: {min_tier: 2}
+  review: {min_tier: 2}
+
+role_constraints:
+  reviewer: {independence: family}
+
+weights: {cost: 0.30, latency: 0.15, quality: 0.55}
+
+retry:
+  max_attempts: 3
+  deadline_s: 30
+  per_attempt_timeout_s: 20
+  first_token_timeout_s: 15
+
+llm_classify:
+  enabled: false
+  threshold: 0.7
+  model: mock/small
+  timeout_s: 3

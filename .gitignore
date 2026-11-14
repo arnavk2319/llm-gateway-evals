@@ -1,0 +1,25 @@
+# --- secrets and local environment (real values must never be committed)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.vercel/
+
+# --- internal design docs, decisions and diagrams (kept locally, not published)
+docs-internal/
+
+# --- local tooling and agent files
+.claude/
+AGENTS.md
+CLAUDE.md
+
+# --- build output and caches
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+.next/
+*.tsbuildinfo
+*.log
+.DS_Store
