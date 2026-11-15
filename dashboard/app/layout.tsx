@@ -15,6 +15,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <Link href="/">Overview</Link>
           <Link href="/logs">Logs</Link>
           <a href="/api/export/spans?format=csv">Export calls</a>
+          <form method="post" action="/api/logout" style={{ marginLeft: "auto" }}>
+            <button type="submit" className="btn">Sign out</button>
+          </form>
         </nav>
         {children}
       </body>

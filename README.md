@@ -13,7 +13,8 @@ An OpenAI-compatible gateway that routes each LLM call to the right model for th
 - **One searchable log stream.** Every event is tagged, timestamped and tied to its agent run and call, so any request can be traced end to end. Filter by source, severity, kind or any tag, open a run to see its calls and events together, and export to CSV, JSON or JSONL.
 - **Error reporting.** Failures are reported to Sentry (or a Sentry-compatible server) with the same tags and ids as the log stream, and each log row links back to its Sentry event.
 - **Versioned routing policy.** Routing behavior lives in a policy you can update without redeploying.
-- **Dashboard.** Cost, latency, errors, fallbacks and recent requests by model, node role and task type.
+- **Dashboard.** Cost, latency, errors, fallbacks and recent requests by model, node role and task type, behind a password login, with log search and exports.
+- **Deploys to Vercel with Neon Postgres.** Serverless-ready: events are written before each response returns, concurrent cold starts migrate the schema safely, and Sentry events are flushed before the function is frozen.
 - **Providers.** Ollama, Groq, OpenRouter and any other OpenAI-compatible API, plus a mock provider for local development and tests.
 
 ## Installation
@@ -75,3 +76,25 @@ Model ids and prices are defined in `gateway/app/data/seed_policy.yaml`; verify 
 ### Error reporting
 
 Set `SENTRY_DSN` (Sentry, or a Sentry-compatible server such as GlitchTip) to report failures. Nothing is sent without it, and prompts and credentials are never included.
+
+### Deploy to Vercel with Neon and Sentry
+
+Create two Vercel projects from this repository, one with root directory `gateway` and one with root directory `dashboard`, and a Neon project in the region closest to your Vercel functions.
+
+| Project | Variable | Value |
+|---|---|---|
+| gateway | `DATABASE_URL` | Neon **pooled** connection string (`-pooler` host, `?sslmode=require`) |
+| gateway | `SENTRY_DSN` | DSN of a Sentry project (optional) |
+| gateway | `GROQ_API_KEY`, `OPENROUTER_API_KEY` | provider keys (optional; the mock provider works without them) |
+| gateway | `GATEWAY_DISABLE_MOCK` | `1` once real providers are configured |
+| dashboard | `DATABASE_URL` or `DATABASE_URL_READONLY` | Neon connection string; prefer a read-only role created with `gateway/scripts/dashboard_role.sql` |
+| dashboard | `DASHBOARD_PASSWORD` | admin password, 12+ characters |
+| dashboard | `DASHBOARD_SESSION_SECRET` | 32+ random characters (`openssl rand -hex 32`) |
+
+Mark every value as Sensitive. On Vercel the gateway requires authentication automatically, so create its first key against the Neon database:
+
+```bash
+cd gateway && DATABASE_URL='<neon connection string>' uv run python scripts/keys.py create --name my-app
+```
+
+The dashboard returns `503` until both dashboard variables are set. The circuit breaker and rate limiter are kept per function instance, so on serverless they are approximate across instances.
