@@ -28,6 +28,7 @@ class LogEvent:
     fingerprint: str | None = None
     payload: dict[str, Any] | None = None
     external_id: str | None = None
+    user_id: str | None = None  # owner of the API key that made the request
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -80,6 +81,8 @@ class SpanEvent:
     overhead_ms: float | None = None
     idempotency_key: str | None = None
     api_key_name: str | None = None
+    api_key_id: str | None = None
+    user_id: str | None = None
     attempts: list[AttemptEvent] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
@@ -147,6 +150,8 @@ def build_span_event(
         overhead_ms=round(overhead, 3),
         idempotency_key=state.get("idempotency_key"),
         api_key_name=state.get("api_key_name"),
+        api_key_id=state.get("api_key_id"),
+        user_id=state.get("user_id"),
         attempts=attempts,
     )
 
@@ -228,4 +233,7 @@ def build_log_events(state: dict[str, Any]) -> list[LogEvent]:
                 fingerprint=f"fallback:{attempts[0]['model']}",
             )
         )
+    for ev in out:  # every log line of a request belongs to the key owner
+        if ev.user_id is None:
+            ev.user_id = state.get("user_id")
     return out

@@ -83,3 +83,15 @@ async def test_concurrent_cold_starts_can_all_migrate_the_same_database():
         await asyncio.gather(*(s.open(migrate=True) for s in sinks))  # would race without the lock
     finally:
         await asyncio.gather(*(s.close() for s in sinks))
+
+
+def test_render_is_a_long_lived_host_that_still_requires_auth(monkeypatch):
+    """Render runs one process, so events are written in the background; but a public host is never open."""
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.delenv("RENDER", raising=False)
+    assert Settings(api_keys="").auth_required is False
+    monkeypatch.setenv("RENDER", "true")
+    cfg = Settings(api_keys="")
+    assert cfg.auth_required is True
+    assert cfg.emit_events_inline is False
+    assert cfg.debug_enabled is False

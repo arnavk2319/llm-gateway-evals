@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     default_rate_limit_per_min: int = 0  # 0 = unlimited unless a key sets its own
     auth_cache_ttl_s: float = 60.0  # how long a verified key is cached (bounds revocation lag)
 
+    # --- dashboard API (/dashboard/v1). The dashboard has no database access: it calls these routes
+    # with this shared secret. Unset means the routes are not mounted at all. See ADR 0001.
+    dashboard_token: str | None = None
+    key_max_per_user: int = 10  # active API keys one user may hold
+    key_default_rpm: int = 60  # rate limit given to a key that does not ask for one
+    key_max_rpm: int = 120  # the most a user may ask for
+
     # --- observability
     sentry_dsn: str | None = Field(
         default=None, validation_alias=AliasChoices("SENTRY_DSN", "GATEWAY_SENTRY_DSN")
@@ -75,12 +82,18 @@ class Settings(BaseSettings):
         return self.debug_endpoints and not self.auth_required
 
     @property
+    def dashboard_api_enabled(self) -> bool:
+        """A short token is as good as none, so the dashboard API stays off until it is long enough."""
+        return bool(self.dashboard_token) and len(self.dashboard_token or "") >= 32
+
+    @property
     def auth_required(self) -> bool:
         if self.auth == "required":
             return True
         if self.auth == "off":
             return False
-        return bool(self.api_keys or self.jwt_secret or os.environ.get("VERCEL"))
+        hosted = os.environ.get("VERCEL") or os.environ.get("RENDER")  # a public deployment never runs open
+        return bool(self.api_keys or self.jwt_secret or hosted)
 
     @property
     def api_key_map(self) -> dict[str, str]:

@@ -107,6 +107,47 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE INDEX IF NOT EXISTS api_keys_name_idx ON api_keys (name);
 
 -- ---------------------------------------------------------------------------
+-- Accounts (created by the dashboard sign-up). Every dashboard-created API key is owned by a
+-- user, and every request made with it is stamped with that user, so the dashboard can show
+-- each person only their own calls.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS users (
+  id             text PRIMARY KEY,
+  email          text NOT NULL,
+  password_hash  text NOT NULL,                 -- scrypt, salted; never the password
+  role           text NOT NULL DEFAULT 'user' CHECK (role IN ('user','admin')),
+  disabled       boolean NOT NULL DEFAULT false, -- a disabled user's keys stop working
+  failed_logins  integer NOT NULL DEFAULT 0,
+  locked_until   timestamptz,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  last_login_at  timestamptz
+);
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_idx ON users (lower(email));
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at timestamptz;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at timestamptz NOT NULL DEFAULT now();
+
+-- Single-use links sent by email (verify the address, reset a password). Only the SHA-256 of the
+-- token is stored, so a database leak does not hand out working links.
+CREATE TABLE IF NOT EXISTS auth_tokens (
+  id          text PRIMARY KEY,
+  user_id     text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  purpose     text NOT NULL CHECK (purpose IN ('verify','reset')),
+  token_hash  text NOT NULL UNIQUE,
+  expires_at  timestamptz NOT NULL,
+  used_at     timestamptz,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS auth_tokens_user_idx ON auth_tokens (user_id, purpose, created_at DESC);
+
+ALTER TABLE api_keys   ADD COLUMN IF NOT EXISTS user_id text REFERENCES users(id);
+ALTER TABLE runs       ADD COLUMN IF NOT EXISTS user_id text;
+ALTER TABLE spans      ADD COLUMN IF NOT EXISTS user_id text;
+ALTER TABLE spans      ADD COLUMN IF NOT EXISTS api_key_id text;
+CREATE INDEX IF NOT EXISTS api_keys_user_idx ON api_keys (user_id);
+CREATE INDEX IF NOT EXISTS spans_user_ts_idx ON spans (user_id, created_at DESC);
+
+-- ---------------------------------------------------------------------------
 -- Unified log stream: one normalized, tagged, timestamped record per event,
 -- from any source (gateway, vercel, neon, sentry, hooks).
 -- ---------------------------------------------------------------------------
@@ -135,11 +176,13 @@ CREATE INDEX IF NOT EXISTS log_events_fingerprint_idx ON log_events (fingerprint
 CREATE INDEX IF NOT EXISTS log_events_tags_idx        ON log_events USING gin (tags jsonb_path_ops);
 CREATE UNIQUE INDEX IF NOT EXISTS log_events_external_idx
   ON log_events (source, external_id) WHERE external_id IS NOT NULL;
+ALTER TABLE log_events ADD COLUMN IF NOT EXISTS user_id text;
+CREATE INDEX IF NOT EXISTS log_events_user_ts_idx ON log_events (user_id, ts DESC);
 
 -- The single place to read from: log events plus one 'request' row per span.
 CREATE OR REPLACE VIEW log_stream AS
 SELECT l.ts, l.source, l.kind, l.severity, l.message, l.tags, l.run_id, l.span_id,
-       l.trace_id, l.fingerprint, l.payload, 'log:' || l.id::text AS id
+       l.trace_id, l.fingerprint, l.payload, 'log:' || l.id::text AS id, l.user_id
 FROM log_events l
 UNION ALL
 SELECT s.created_at, 'gateway', 'request',
@@ -157,5 +200,5 @@ SELECT s.created_at, 'gateway', 'request',
          'cost_usd', s.cost_usd, 'shadow_cost_usd', s.shadow_cost_usd,
          'attempts', s.attempt_count, 'route_reason', s.route_reason,
          'node_timings', s.node_timings),
-       'span:' || s.span_id
+       'span:' || s.span_id, s.user_id
 FROM spans s;

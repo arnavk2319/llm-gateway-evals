@@ -187,7 +187,8 @@ a {
   margin-bottom: 12px;
 }
 .filters input,
-.filters select {
+.filters select,
+.stack input {
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
@@ -199,6 +200,8 @@ a {
   flex: 1 1 260px;
 }
 .filters button,
+.stack button,
+.card button:not(.btn),
 .btn {
   background: var(--accent);
   color: var(--bg);
@@ -209,7 +212,8 @@ a {
   cursor: pointer;
   text-decoration: none;
 }
-.btn {
+.btn,
+.card .btn {
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
@@ -329,3 +333,10 @@ td.wf {
 .kpi .v.bad {
   color: var(--bad);
 }
+
+.stack { display: flex; flex-direction: column; gap: 10px; }
+.card { border: 1px solid var(--border); background: var(--surface); border-radius: 8px; padding: 14px 16px; margin: 12px 0; }
+pre { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; overflow-x: auto; font-size: 12.5px; }
+pre.secret { font-size: 14px; user-select: all; word-break: break-all; white-space: pre-wrap; }
+.field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+.banner { background: var(--surface); border-bottom: 1px solid var(--border); color: var(--warn); padding: 8px 16px; }

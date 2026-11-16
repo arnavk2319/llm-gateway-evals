@@ -140,6 +140,11 @@ class PostgresSink:
             kwargs={"prepare_threshold": None, "connect_timeout": 15},
         )
 
+    @property
+    def pool(self) -> Any:
+        """The connection pool, shared with the dashboard API (see dashboard_store.py)."""
+        return self._pool
+
     async def open(self, migrate: bool = True) -> None:
         await self._pool.open()
         if migrate:
@@ -168,10 +173,10 @@ class PostgresSink:
         async with self._pool.connection() as conn, conn.transaction():
             for e in events:
                 await conn.execute(
-                    """INSERT INTO runs (run_id, api_key_name, origin)
-                           VALUES (%s, %s, %s)
+                    """INSERT INTO runs (run_id, api_key_name, origin, user_id)
+                           VALUES (%s, %s, %s, %s)
                            ON CONFLICT (run_id) DO UPDATE SET last_span_at = now()""",
-                    (e.run_id, e.api_key_name, e.origin),
+                    (e.run_id, e.api_key_name, e.origin, e.user_id),
                 )
                 ts = datetime.fromtimestamp(e.created_at, tz=UTC)
                 await conn.execute(
@@ -181,9 +186,9 @@ class PostgresSink:
                              provider, model, family, route_reason, route_relaxed, stream, status,
                              error_class, http_status, prompt_tokens, completion_tokens, cached_tokens,
                              cost_usd, shadow_cost_usd, latency_ms, ttft_ms, attempt_count, fell_back,
-                             node_timings, overhead_ms, idempotency_key, api_key_name, created_at)
+                             node_timings, overhead_ms, idempotency_key, api_key_name, api_key_id, user_id, created_at)
                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                                   %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                   %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                            ON CONFLICT (span_id) DO NOTHING""",
                     (
                         e.span_id, e.run_id, e.parent_span_id, e.origin, e.node_role, e.task_type,
@@ -195,7 +200,7 @@ class PostgresSink:
                         None if e.latency_ms is None else int(e.latency_ms),
                         None if e.ttft_ms is None else int(e.ttft_ms),
                         e.attempt_count, e.fell_back, Jsonb(e.node_timings), e.overhead_ms,
-                        e.idempotency_key, e.api_key_name, ts,
+                        e.idempotency_key, e.api_key_name, e.api_key_id, e.user_id, ts,
                     ),
                 )
                 for a in e.attempts:
@@ -221,13 +226,13 @@ class PostgresSink:
             for e in logs:
                 await conn.execute(
                     """INSERT INTO log_events (ts, source, kind, severity, message, tags, run_id,
-                                                   span_id, trace_id, fingerprint, payload, external_id)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                                   span_id, trace_id, fingerprint, payload, external_id, user_id)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                            ON CONFLICT DO NOTHING""",
                     (
                         datetime.fromtimestamp(e.ts, tz=UTC), e.source, e.kind, e.severity,
                         e.message, Jsonb(e.tags), e.run_id, e.span_id, e.trace_id, e.fingerprint,
-                        Jsonb(e.payload) if e.payload is not None else None, e.external_id,
+                        Jsonb(e.payload) if e.payload is not None else None, e.external_id, e.user_id,
                     ),
                 )
 
@@ -277,7 +282,11 @@ class PostgresSink:
         from psycopg.rows import dict_row
 
         async with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT * FROM api_keys WHERE key_hash = %s", (key_hash,))
+            await cur.execute(
+                "SELECT k.*, coalesce(u.disabled, false) AS user_disabled FROM api_keys k "
+                "LEFT JOIN users u ON u.id = k.user_id WHERE k.key_hash = %s",
+                (key_hash,),
+            )
             return await cur.fetchone()
 
     async def touch_api_key(self, key_id: str) -> None:
@@ -288,12 +297,13 @@ class PostgresSink:
         async with self._pool.connection() as conn:
             await conn.execute(
                 """INSERT INTO api_keys (id, name, key_prefix, key_hash, status, allowed_models,
-                                         rate_limit_per_min, expires_at, rotated_from)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                         rate_limit_per_min, expires_at, rotated_from, user_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (
                     record["id"], record["name"], record["key_prefix"], record["key_hash"],
                     record.get("status", "active"), record.get("allowed_models"),
                     record.get("rate_limit_per_min"), record.get("expires_at"), record.get("rotated_from"),
+                    record.get("user_id"),
                 ),
             )
 
@@ -303,7 +313,7 @@ class PostgresSink:
         async with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT id, name, key_prefix, status, allowed_models, rate_limit_per_min, "
-                "expires_at, rotated_from, created_at, last_used_at FROM api_keys ORDER BY created_at"
+                "expires_at, rotated_from, created_at, last_used_at, user_id FROM api_keys ORDER BY created_at"
             )
             return await cur.fetchall()
 

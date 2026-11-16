@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { requireUser, scopeOf } from "@/lib/auth";
 import { getDashboard, type GroupRow } from "@/lib/queries";
 import { ago, int, ms, pct, usd } from "@/lib/format";
 
@@ -71,20 +72,21 @@ function GroupTable({ title, rows, keyLabel }: { title: string; rows: GroupRow[]
 }
 
 export default async function Page({ searchParams }: { searchParams: Promise<{ hours?: string }> }) {
+  const user = await requireUser();
   const { hours } = await searchParams;
   const h = WINDOWS.some((w) => w.h === Number(hours)) ? Number(hours) : 24;
 
   let data;
   try {
-    data = await getDashboard(h);
+    data = await getDashboard(h, scopeOf(user));
   } catch (e) {
     return (
       <main>
         <h1>LLM Gateway</h1>
-        <h2>Can&apos;t reach the database</h2>
+        <h2>Can&apos;t reach the gateway</h2>
         <div className="empty">
           <p>
-            Set <code>DATABASE_URL</code> (see <code>.env.example</code>) and make sure the gateway has applied the
+            Set <code>GATEWAY_URL</code> and <code>GATEWAY_DASHBOARD_TOKEN</code> (see <code>.env.example</code>) and make sure the gateway has applied the
             schema.
           </p>
           <p className="muted">{e instanceof Error ? e.message : String(e)}</p>

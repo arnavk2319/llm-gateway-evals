@@ -167,6 +167,8 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
             "outcome": None,
             "error": None,
             "api_key_name": None,
+            "api_key_id": None,
+            "user_id": None,
             "allowed_models": None,
             "auth_method": "none",
             "environment": deps.settings.environment,
@@ -179,6 +181,8 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
             return update
         if principal.auth_method != "none":
             update["api_key_name"] = principal.name
+            update["api_key_id"] = principal.key_id
+            update["user_id"] = principal.user_id
         update["auth_method"] = principal.auth_method
         update["allowed_models"] = principal.allowed_models
 

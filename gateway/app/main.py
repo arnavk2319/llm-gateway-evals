@@ -19,6 +19,7 @@ from starlette.background import BackgroundTask
 from . import observability
 from .auth import Authenticator
 from .config import ENV_FILES, Settings
+from .dashboard_api import build_router as build_dashboard_router
 from .events import build_log_events, build_span_event
 from .graph.build import build_graph
 from .graph.nodes import Deps
@@ -199,6 +200,8 @@ def create_app(
 
     app = FastAPI(title="LLM Gateway", version="0.1.0", lifespan=lifespan)
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_bytes)
+    if settings.dashboard_api_enabled:  # off unless a 32+ character token is configured (ADR 0001)
+        app.include_router(build_dashboard_router(settings))
 
     @app.get("/healthz")
     async def healthz(request: Request):

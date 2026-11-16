@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { requireUser, scopeOf } from "@/lib/auth";
 import { countLogs, FACET_TAG_KEYS, getFacets, searchLogs, type Facet } from "@/lib/logs";
 import {
   SEVERITIES,
@@ -39,17 +40,19 @@ function FacetList({ title, facets, href, active }: {
 }
 
 export default async function LogsPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
+  const user = await requireUser();
+  const scope = scopeOf(user);
   const f: LogFilter = parseFilter(await searchParams);
   let data;
   try {
-    const [rows, total, facets] = await Promise.all([searchLogs(f, PAGE_SIZE), countLogs(f), getFacets(f)]);
+    const [rows, total, facets] = await Promise.all([searchLogs(f, scope, PAGE_SIZE), countLogs(f, scope), getFacets(f, scope)]);
     data = { rows, total, facets };
   } catch (e) {
     return (
       <main>
         <h1>Logs</h1>
         <div className="empty">
-          <p>Can&apos;t read the log stream. Check DATABASE_URL and that the gateway has applied the schema.</p>
+          <p>Can&apos;t read the log stream. Check GATEWAY_URL and GATEWAY_DASHBOARD_TOKEN, and that the gateway is running.</p>
           <p className="muted">{e instanceof Error ? e.message : String(e)}</p>
         </div>
       </main>

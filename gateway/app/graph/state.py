@@ -22,6 +22,8 @@ class GatewayState(TypedDict, total=False):
     parent_call_id: str | None
     origin: str  # external | internal
     api_key_name: str | None
+    api_key_id: str | None
+    user_id: str | None
     idempotency_key: str | None
     task_hint: str | None
     quality_hint: str | None

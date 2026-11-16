@@ -1,29 +1,45 @@
 import { NextResponse } from "next/server";
-import { authConfig, COOKIE, safeEqual, safeNext, SESSION_TTL_S, signSession } from "@/lib/session";
+import { sameOrigin, sessionCookie } from "@/lib/auth";
+import { normalizeEmail } from "@/lib/accounts";
+import { burnPasswordCheck, PASSWORD_MAX, verifyPassword } from "@/lib/password";
+import { authConfig, safeNext } from "@/lib/session";
+import { findByEmail, recordFailure, recordSuccess } from "@/lib/users";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
-  const cfg = authConfig();
+  if (!sameOrigin(req)) return new Response("cross-site request refused", { status: 403 });
   const form = await req.formData().catch(() => null);
   const next = safeNext(String(form?.get("next") ?? ""));
-  const back = (error: string) => NextResponse.redirect(new URL(`/login?error=${error}`, req.url), 303);
+  const back = (error: string) =>
+    NextResponse.redirect(new URL(`/login?error=${error}&next=${encodeURIComponent(next)}`, req.url), 303);
 
-  if (!cfg.ok) return back("unconfigured");
-  if ("open" in cfg) return NextResponse.redirect(new URL(next, req.url), 303);
+  if (!authConfig().ok) return back("unconfigured");
 
-  // Slow every attempt down a little: this endpoint is the only thing guessing can target.
-  await new Promise((r) => setTimeout(r, 400));
-  const given = String(form?.get("password") ?? "");
-  if (!safeEqual(given, cfg.password)) return back("invalid");
+  const email = normalizeEmail(form?.get("email"));
+  const password = String(form?.get("password") ?? "");
+  await new Promise((r) => setTimeout(r, 300)); // slows guessing a little; the account lockout does the rest
+  if (!email || email.length > 254 || password.length > PASSWORD_MAX) return back("invalid");
+
+  let user;
+  try {
+    user = await findByEmail(email);
+  } catch {
+    return back("unavailable");
+  }
+  if (!user) {
+    await burnPasswordCheck(password); // same work whether or not the address exists
+    return back("invalid");
+  }
+  const ok = await verifyPassword(password, user.passwordHash);
+  if (!ok || user.locked || user.disabled) {
+    if (!ok && !user.locked) await recordFailure(user.id).catch(() => undefined);
+    return back("invalid");
+  }
+  await recordSuccess(user.id).catch(() => undefined);
 
   const res = NextResponse.redirect(new URL(next, req.url), 303);
-  res.cookies.set(COOKIE, await signSession(cfg.secret), {
-    httpOnly: true,
-    secure: new URL(req.url).protocol === "https:",
-    sameSite: "lax",
-    path: "/",
-    maxAge: SESSION_TTL_S,
-  });
+  const c = await sessionCookie(user.id, req);
+  res.cookies.set(c.name, c.value, c.options);
   return res;
 }
