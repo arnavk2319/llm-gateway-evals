@@ -9,6 +9,9 @@
 # --- internal design docs, decisions and diagrams (kept locally, not published)
 docs-internal/
 
+# --- private deployment setup guide (environment details, kept locally)
+SETUP-vercel-neon-sentry.md
+
 # --- local tooling and agent files
 .claude/
 AGENTS.md

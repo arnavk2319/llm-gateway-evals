@@ -180,7 +180,10 @@ ALTER TABLE log_events ADD COLUMN IF NOT EXISTS user_id text;
 CREATE INDEX IF NOT EXISTS log_events_user_ts_idx ON log_events (user_id, ts DESC);
 
 -- The single place to read from: log events plus one 'request' row per span.
-CREATE OR REPLACE VIEW log_stream AS
+-- Dropped and recreated rather than CREATE OR REPLACE, which cannot remove or reorder columns: that
+-- made a gateway running older code refuse to start against a database a newer release had migrated.
+DROP VIEW IF EXISTS log_stream;
+CREATE VIEW log_stream AS
 SELECT l.ts, l.source, l.kind, l.severity, l.message, l.tags, l.run_id, l.span_id,
        l.trace_id, l.fingerprint, l.payload, 'log:' || l.id::text AS id, l.user_id
 FROM log_events l

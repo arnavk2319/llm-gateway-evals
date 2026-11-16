@@ -137,7 +137,11 @@ class PostgresSink:
         # connect_timeout leaves room for a scaled-to-zero Neon compute to wake up.
         self._pool = AsyncConnectionPool(
             dsn, min_size=1, max_size=5, open=False,
-            kwargs={"prepare_threshold": None, "connect_timeout": 15},
+            # Neon suspends an idle compute and drops its connections. Retire idle ones sooner than
+            # that and test each connection as it is handed out, so a request never inherits a dead one.
+            max_idle=60, check=AsyncConnectionPool.check_connection,
+            kwargs={"prepare_threshold": None, "connect_timeout": 15,
+                    "keepalives": 1, "keepalives_idle": 30, "keepalives_interval": 10},
         )
 
     @property

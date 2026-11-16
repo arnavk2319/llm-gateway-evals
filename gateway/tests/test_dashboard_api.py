@@ -129,8 +129,8 @@ async def test_five_wrong_passwords_lock_and_a_success_clears(pg):
 @PG
 async def test_keys_are_created_once_capped_listed_without_secret_and_revoked_by_the_owner_only(pg):
     c, sink, tag = pg
-    alice = (await signup(c, tag, "alice")).json()["id"]
-    bob = (await signup(c, tag, "bob")).json()["id"]
+    alice = (await signup(c, tag, "alice", verified=True)).json()["id"]
+    bob = (await signup(c, tag, "bob", verified=True)).json()["id"]
     body = {"name": "app", "expiresDays": 30, "models": ["mock/small", "mock/small"], "rpm": 50}
     made = []
     for _ in range(3):
@@ -163,6 +163,22 @@ async def test_keys_are_created_once_capped_listed_without_secret_and_revoked_by
 
 
 @PG
+async def test_only_an_active_confirmed_user_can_hold_keys(pg):
+    c, _, tag = pg
+    new = (await signup(c, tag, "carol")).json()["id"]  # signed up, email not confirmed
+    r = await c.post(f"/dashboard/v1/users/{new}/keys", json={"name": "x"}, headers=AUTH)
+    assert r.status_code == 403 and "Confirm your email" in r.json()["detail"]
+    assert (await c.get(f"/dashboard/v1/users/{new}/keys", headers=AUTH)).json() == []
+
+    ok = (await signup(c, tag, "dora", verified=True)).json()["id"]
+    assert (await c.post(f"/dashboard/v1/users/{ok}/keys", json={"name": "x"}, headers=AUTH)).status_code == 201
+    await c.post(f"/dashboard/v1/users/{ok}/disabled", json={"disabled": True}, headers=AUTH)
+    assert (await c.post(f"/dashboard/v1/users/{ok}/keys", json={"name": "y"}, headers=AUTH)).status_code == 404
+    ghost = "usr_" + "0" * 12
+    assert (await c.post(f"/dashboard/v1/users/{ghost}/keys", json={"name": "x"}, headers=AUTH)).status_code == 404
+
+
+@PG
 async def test_key_limits_are_published_for_the_form(pg):
     c, _, _ = pg
     r = await c.get("/dashboard/v1/key-limits", headers=AUTH)
@@ -172,7 +188,7 @@ async def test_key_limits_are_published_for_the_form(pg):
 @PG
 async def test_a_key_may_not_ask_for_more_than_the_rate_limit_ceiling(pg):
     c, _, tag = pg
-    uid = (await signup(c, tag, "alice")).json()["id"]
+    uid = (await signup(c, tag, "alice", verified=True)).json()["id"]
     r = await c.post(f"/dashboard/v1/users/{uid}/keys", json={"name": "x", "rpm": 121}, headers=AUTH)
     assert r.status_code == 400 and "1-120" in r.json()["detail"]
 
@@ -181,7 +197,7 @@ async def test_a_key_may_not_ask_for_more_than_the_rate_limit_ceiling(pg):
 async def test_keys_made_here_authenticate_against_the_gateway(pg):
     c, _, tag = pg
     dsn = os.environ["TEST_DATABASE_URL"]
-    uid = (await signup(c, tag, "alice")).json()["id"]
+    uid = (await signup(c, tag, "alice", verified=True)).json()["id"]
     key = (await c.post(f"/dashboard/v1/users/{uid}/keys", json={"name": "x"}, headers=AUTH)).json()["key"]
     chat = {"messages": [{"role": "user", "content": "hi"}]}
 

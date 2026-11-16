@@ -25,9 +25,9 @@ export const getKeyLimits = () => gw<KeyLimits>("/key-limits");
 export async function createKey(
   userId: string,
   input: NewKeyInput,
-): Promise<{ ok: true; key: CreatedKey } | { ok: false; status: 400 | 409; error: string }> {
-  const r = await gwOrStatus<CreatedKey>(`/users/${enc(userId)}/keys`, { method: "POST", body: input }, [400, 409]);
-  return r.ok ? { ok: true, key: r.data } : { ok: false, status: r.status as 400 | 409, error: r.message };
+): Promise<{ ok: true; key: CreatedKey } | { ok: false; status: 400 | 403 | 409; error: string }> {
+  const r = await gwOrStatus<CreatedKey>(`/users/${enc(userId)}/keys`, { method: "POST", body: input }, [400, 403, 409]);
+  return r.ok ? { ok: true, key: r.data } : { ok: false, status: r.status as 400 | 403 | 409, error: r.message };
 }
 
 export const listKeys = (userId: string) => gw<KeyRow[]>(`/users/${enc(userId)}/keys`);

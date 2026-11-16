@@ -216,10 +216,12 @@ def build_router(settings: Settings) -> APIRouter:
         created = await store.create_key(
             user_id, body.name, body.expiresDays, sorted(set(body.models)), rpm, settings.key_max_per_user
         )
-        if created is None:
-            raise _error(
-                409, f"You can have at most {settings.key_max_per_user} active keys. Revoke one first."
-            )
+        if created == "unknown_user":
+            raise _error(404, "no such active user")
+        if created == "unverified":
+            raise _error(403, "Confirm your email address first.")
+        if created == "limit":
+            raise _error(409, f"You can have at most {settings.key_max_per_user} active keys. Revoke one first.")
         return ok(created, 201)
 
     @router.post("/users/{user_id}/keys/{key_id}/revoke")

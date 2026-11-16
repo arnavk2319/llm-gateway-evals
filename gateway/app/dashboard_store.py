@@ -14,7 +14,7 @@ import secrets
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Any, LiteralString
+from typing import Any, Literal, LiteralString
 
 from psycopg import sql
 from psycopg.rows import dict_row
@@ -71,7 +71,10 @@ class DashboardStore:
     async def _tx(self) -> AsyncIterator[Any]:
         """A cursor inside a transaction with a statement timeout that ends with it."""
         async with self._pool.connection() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(sql.SQL("SET LOCAL statement_timeout = {}").format(sql.Literal(STATEMENT_TIMEOUT)))
+            # SET cannot take bind parameters; the value is a module constant quoted by psycopg.
+            await cur.execute(  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
+                sql.SQL("SET LOCAL statement_timeout = {}").format(sql.Literal(STATEMENT_TIMEOUT))
+            )
             yield cur
 
     async def _all(self, query: sql.Composable | LiteralString, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
@@ -245,8 +248,19 @@ class DashboardStore:
 
     async def create_key(
         self, user_id: str, name: str, expires_days: int | None, models: list[str], rpm: int, max_per_user: int
-    ) -> dict[str, Any] | None:
-        """The secret is returned once and only its hash is stored. None when the user is at the cap."""
+    ) -> dict[str, Any] | Literal["limit", "unverified", "unknown_user"]:
+        """The secret is returned once and only its hash is stored.
+
+        Only an active user with a confirmed email may hold keys, whoever asks: a key can spend provider
+        quota, so this rule lives here and not only in the dashboard's form handler.
+        """
+        owner = await self._one(
+            "SELECT disabled, email_verified_at IS NOT NULL AS verified FROM users WHERE id = %s", [user_id]
+        )
+        if owner is None or owner["disabled"]:
+            return "unknown_user"
+        if not owner["verified"]:
+            return "unverified"
         key = generate_key()
         key_id = "key_" + secrets.token_hex(6)
         prefix = key[:12]
@@ -259,7 +273,7 @@ class DashboardStore:
             [key_id, name, prefix, hash_key(key), models or None, rpm, expires_at, user_id, user_id, max_per_user],
         )
         if not rows:
-            return None
+            return "limit"
         return {"key": key, "id": key_id, "name": name, "prefix": prefix, "rpm": rpm, "expiresAt": iso(expires_at)}
 
     async def list_keys(self, user_id: str) -> list[dict[str, Any]]:
