@@ -1,6 +1,13 @@
+<!-- portfolio: section=ai-rag -->
 # LLM Gateway
 
 An OpenAI-compatible gateway that routes each LLM call to the right model for the task, with tracing, cost tracking and a dashboard.
+
+**Live demo:** https://llm-gateway-evals.vercel.app
+
+![LLM Gateway dashboard: requests, error and fallback rates, latency, cost and tokens, broken down by model and node role](docs/screenshot.png)
+
+Keywords: `ai-rag` · LLM gateway · model routing · tracing · evals · cost tracking · OpenAI-compatible
 
 ## Capabilities
 
