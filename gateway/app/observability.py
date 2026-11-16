@@ -42,7 +42,7 @@ def init_sentry(settings: Settings, **sdk_overrides: Any) -> bool:
     options: dict[str, Any] = {
         "dsn": settings.sentry_dsn,
         "environment": settings.environment,
-        "release": os.environ.get("VERCEL_GIT_COMMIT_SHA"),
+        "release": os.environ.get("VERCEL_GIT_COMMIT_SHA") or os.environ.get("RENDER_GIT_COMMIT"),
         "traces_sample_rate": settings.sentry_traces_sample_rate,
         # No user identity and no request bodies (prompts) from integrations; scrub_event
         # additionally strips credentials, cookies and query strings.
@@ -51,6 +51,9 @@ def init_sentry(settings: Settings, **sdk_overrides: Any) -> bool:
     }
     options.update(sdk_overrides)
     sentry_sdk.init(**options)
+    branch = os.environ.get("VERCEL_GIT_COMMIT_REF") or os.environ.get("RENDER_GIT_BRANCH")
+    if branch:
+        sentry_sdk.set_tag("git_branch", branch)  # tells `dev` from `main` and from feature previews
     return True
 
 

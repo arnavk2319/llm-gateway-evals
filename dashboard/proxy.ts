@@ -1,20 +1,24 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { authConfig, COOKIE, verifySession } from "@/lib/session";
 
-const PUBLIC = ["/login", "/api/login"];
+// Reachable without a session. Everything else needs a signed cookie; pages and API routes then
+// look the user up again, so a disabled account loses access immediately.
+const PUBLIC = [
+  "/login", "/signup", "/forgot", "/reset", "/verify",
+  "/api/login", "/api/signup", "/api/forgot", "/api/reset", "/api/verify",
+];
 
 export async function proxy(req: NextRequest) {
   const cfg = authConfig();
   const { pathname } = req.nextUrl;
 
   if (!cfg.ok) {
-    return new NextResponse(
-      "Dashboard is not configured: set DASHBOARD_PASSWORD (12+ characters) and DASHBOARD_SESSION_SECRET (32+ characters).",
-      { status: 503, headers: { "cache-control": "no-store" } },
-    );
+    return new NextResponse("Dashboard is not configured: set DASHBOARD_SESSION_SECRET (32+ random characters).", {
+      status: 503,
+      headers: { "cache-control": "no-store" },
+    });
   }
-  if ("open" in cfg || PUBLIC.includes(pathname)) return NextResponse.next();
-
+  if (PUBLIC.includes(pathname)) return NextResponse.next();
   if (await verifySession(cfg.secret, req.cookies.get(COOKIE)?.value)) return NextResponse.next();
 
   if (pathname.startsWith("/api/")) {

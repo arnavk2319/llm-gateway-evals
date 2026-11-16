@@ -5,3 +5,6 @@ b2aa0c38f512ced1708b0fb5d11a2d2c53f5ce78:gateway/tests/test_security.py:generic-
 
 # Test-only JWT secret constant in an earlier commit; not a real credential.
 a3e9e7cb9303107c63a082b67bae5037d4536a1f:gateway/tests/test_auth.py:generic-api-key:10
+
+# SHA-256 test vector (the hash of a made-up key) shared by the Python and TypeScript tests; not a credential.
+4e765f9ddfd4dc9db2582f13b0f95323cbd823a4:gateway/tests/test_accounts.py:generic-api-key:13

@@ -74,6 +74,7 @@ class Principal:
     auth_method: str  # api_key | env_key | jwt | none
     allowed_models: list[str] | None = None
     rate_limit_per_min: int | None = None
+    user_id: str | None = None  # the account that owns the key (dashboard-created keys)
 
 
 # ---- JWT (HS256, no external dependency) ------------------------------------
@@ -198,7 +199,7 @@ class Authenticator:
         rec = await self._lookup(h)
         if rec is None:
             return self._env_key(token)
-        if rec.get("status") != "active":
+        if rec.get("status") != "active" or rec.get("user_disabled"):
             raise AuthError(401, "invalid_token", "revoked", error_class="key_revoked")
         exp = rec.get("expires_at")
         if exp is not None:
@@ -211,6 +212,7 @@ class Authenticator:
             rec["name"], rec["id"], "api_key",
             allowed_models=list(rec["allowed_models"]) if rec.get("allowed_models") else None,
             rate_limit_per_min=rec.get("rate_limit_per_min"),
+            user_id=rec.get("user_id"),
         )
 
     async def _lookup(self, key_hash: str) -> dict[str, Any] | None:

@@ -1,10 +1,12 @@
 /**
- * Admin login session: a signed, expiring cookie. No database, no third-party service.
- * Uses Web Crypto only, so it runs in the proxy (edge or Node) and in route handlers alike.
+ * Dashboard sessions: a signed, expiring cookie that carries the user id. Uses Web Crypto only,
+ * so it runs in the proxy (edge or Node) and in route handlers alike. The cookie proves who the
+ * user was when it was issued; pages and API routes still look the user up (see lib/auth.ts), so
+ * disabling an account takes effect immediately.
  */
 
 export const COOKIE = "gw_session";
-export const SESSION_TTL_S = 12 * 60 * 60;
+export const SESSION_TTL_S = 7 * 24 * 60 * 60;
 
 const enc = new TextEncoder();
 
@@ -23,32 +25,34 @@ export function safeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-export async function signSession(secret: string, now = Date.now()): Promise<string> {
+const USER_ID_RE = /^usr_[a-f0-9]{12}$/;
+
+export async function signSession(secret: string, userId: string, now = Date.now()): Promise<string> {
   const exp = Math.floor(now / 1000) + SESSION_TTL_S;
-  return `${exp}.${await hmac(secret, `session:${exp}`)}`;
+  return `${userId}.${exp}.${await hmac(secret, `session:${userId}:${exp}`)}`;
 }
 
-export async function verifySession(secret: string, token: string | undefined, now = Date.now()): Promise<boolean> {
-  if (!token) return false;
-  const [exp, mac, ...rest] = token.split(".");
-  if (!exp || !mac || rest.length || !/^\d{1,12}$/.test(exp)) return false;
-  if (Number(exp) * 1000 <= now) return false;
-  return safeEqual(mac, await hmac(secret, `session:${exp}`));
+export type Session = { uid: string; issuedAt: number }; // issuedAt in seconds
+
+/** Who the cookie was issued to and when, or null if it is missing, forged, malformed or expired. */
+export async function verifySession(secret: string, token: string | undefined, now = Date.now()): Promise<Session | null> {
+  if (!token) return null;
+  const [uid, exp, mac, ...rest] = token.split(".");
+  if (!uid || !exp || !mac || rest.length || !USER_ID_RE.test(uid) || !/^\d{1,12}$/.test(exp)) return null;
+  if (Number(exp) * 1000 <= now) return null;
+  if (!safeEqual(mac, await hmac(secret, `session:${uid}:${exp}`))) return null;
+  return { uid, issuedAt: Number(exp) - SESSION_TTL_S };
 }
 
-export type AuthConfig =
-  | { ok: true; password: string; secret: string }
-  | { ok: false; reason: "unconfigured" };
+export type AuthConfig = { ok: true; secret: string } | { ok: false; reason: "unconfigured" };
 
-/**
- * The dashboard shows prompts' metadata and costs, so it fails closed: in production it is
- * unreachable until both variables are set. Local development may run without a login.
- */
-export function authConfig(env: Record<string, string | undefined> = process.env): AuthConfig | { ok: true; open: true } {
-  const password = env.DASHBOARD_PASSWORD ?? "";
+const DEV_SECRET = "development-only-secret-do-not-use-in-production";
+
+/** Production fails closed until DASHBOARD_SESSION_SECRET (32+ characters) is set. */
+export function authConfig(env: Record<string, string | undefined> = process.env): AuthConfig {
   const secret = env.DASHBOARD_SESSION_SECRET ?? "";
-  if (password.length >= 12 && secret.length >= 32) return { ok: true, password, secret };
-  if (env.NODE_ENV !== "production") return { ok: true, open: true };
+  if (secret.length >= 32) return { ok: true, secret };
+  if (env.NODE_ENV !== "production") return { ok: true, secret: DEV_SECRET };
   return { ok: false, reason: "unconfigured" };
 }
 

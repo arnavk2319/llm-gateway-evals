@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { requireUser, scopeOf } from "@/lib/auth";
 import { getRun, type RunSpan } from "@/lib/logs";
 import { int, ms, usd } from "@/lib/format";
 
@@ -18,12 +19,13 @@ const sevClass = (s: string) =>
   s === "error" || s === "critical" ? "bad" : s === "warn" ? "warn" : s === "info" ? "ok" : "muted";
 
 export default async function RunPage({ params }: { params: Promise<{ runId: string }> }) {
+  const user = await requireUser();
   const { runId: raw } = await params;
   const runId = decodeURIComponent(raw);
 
   let run;
   try {
-    run = await getRun(runId);
+    run = await getRun(runId, scopeOf(user));
   } catch (e) {
     return (
       <main>

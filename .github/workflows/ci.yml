@@ -131,6 +131,4 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
-      - run: npm run build
-        env:
-          DATABASE_URL: postgresql://unused:unused@localhost:5432/unused # build must not need a database
+      - run: npm run build # needs no gateway or database: the dashboard talks to the gateway only at request time

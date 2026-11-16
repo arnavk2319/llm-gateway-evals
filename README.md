@@ -7,14 +7,15 @@ An OpenAI-compatible gateway that routes each LLM call to the right model for th
 - **Drop-in OpenAI-compatible API.** Chat completions with streaming; point any OpenAI SDK at the gateway by changing the base URL.
 - **Automatic routing.** Picks a model per request from task type, complexity, context size, tool and JSON needs, cost and latency, or pin a specific model when you want one.
 - **Role-aware routing for multi-agent workflows.** For example, a reviewer call is routed to a different model family than the one that produced the work.
-- **Per-call authentication.** API keys (stored hashed, expiring, revocable, rotatable without downtime, scoped to specific models, with per-key rate limits) and short-lived signed tokens that clients refresh when they expire.
+- **Accounts and self-serve keys.** Sign up in the dashboard (email confirmation, password reset and password change included), create API keys there, and use them directly as the bearer token against the gateway, or as the `api_key` of any OpenAI SDK. Keys are stored hashed, shown once, and can expire, be scoped to specific models, rate-limited and revoked.
+- **Per-call authentication.** API keys, plus short-lived signed tokens that clients refresh when they expire, and keys can be rotated without downtime from the command line.
 - **Retries, fallbacks and failover.** If a provider errors, times out or returns invalid output, the request moves to the next best model within a retry budget. A rejected provider key fails over to a secondary key, unhealthy providers are taken out of rotation by a circuit breaker, and `Retry-After` is honored.
 - **Cost tracking.** Real cost plus a "shadow" cost at list price, so free-tier and local models still produce meaningful numbers.
 - **One searchable log stream.** Every event is tagged, timestamped and tied to its agent run and call, so any request can be traced end to end. Filter by source, severity, kind or any tag, open a run to see its calls and events together, and export to CSV, JSON or JSONL.
 - **Error reporting.** Failures are reported to Sentry (or a Sentry-compatible server) with the same tags and ids as the log stream, and each log row links back to its Sentry event.
 - **Versioned routing policy.** Routing behavior lives in a policy you can update without redeploying.
-- **Dashboard.** Cost, latency, errors, fallbacks and recent requests by model, node role and task type, behind a password login, with log search and exports.
-- **Deploys to Vercel with Neon Postgres.** Serverless-ready: events are written before each response returns, concurrent cold starts migrate the schema safely, and Sentry events are flushed before the function is frozen.
+- **Dashboard.** Cost, latency, errors, fallbacks and recent requests by model, node role and task type, with log search and exports. Each user sees only the calls made with their own keys; admins see everything and can disable users.
+- **Deploys on Render or Vercel with Neon Postgres.** Runs as a long-lived web service or serverless: events are written before each response returns where needed, concurrent cold starts migrate the schema safely, and Sentry events are flushed before the function is frozen.
 - **Providers.** Ollama, Groq, OpenRouter and any other OpenAI-compatible API, plus a mock provider for local development and tests.
 
 ## Installation
@@ -43,6 +44,8 @@ Run the dashboard in another terminal:
 cd dashboard && cp .env.example .env.local && npm install && npm run dev   # http://localhost:3100
 ```
 
+Create an account at `/signup` (open on localhost), then create a key under **API keys**.
+
 Without `DATABASE_URL` the gateway runs with an in-memory event store.
 
 ### Authentication
@@ -58,7 +61,7 @@ uv run python scripts/keys.py rotate <key-id> --grace-hours 24      # new key no
 uv run python scripts/keys.py revoke <key-id>
 ```
 
-Callers send `Authorization: Bearer <key>`. For short-lived tokens, set `GATEWAY_JWT_SECRET` and mint HS256 tokens in your own backend; when a token expires the gateway answers `401` with `error_description="expired"`, and the client mints a fresh one and retries.
+Keys created in the dashboard work the same way as these. Callers send `Authorization: Bearer <key>`, and the OpenAI SDKs do this when you pass the key as `api_key` and the gateway's address plus `/v1` as `base_url`. For short-lived tokens, set `GATEWAY_JWT_SECRET` and mint HS256 tokens in your own backend; when a token expires the gateway answers `401` with `error_description="expired"`, and the client mints a fresh one and retries.
 
 ### Providers
 
@@ -77,24 +80,37 @@ Model ids and prices are defined in `gateway/app/data/seed_policy.yaml`; verify 
 
 Set `SENTRY_DSN` (Sentry, or a Sentry-compatible server such as GlitchTip) to report failures. Nothing is sent without it, and prompts and credentials are never included.
 
-### Deploy to Vercel with Neon and Sentry
+### Deploy: gateway on Render, dashboard on Vercel, Neon, Sentry, Resend
 
-Create two Vercel projects from this repository, one with root directory `gateway` and one with root directory `dashboard`, and a Neon project in the region closest to your Vercel functions.
+Run the same setup per environment (production from `main`, another from `dev`), each with its own Neon branch, Sentry project and secrets.
 
-| Project | Variable | Value |
+- **Gateway** (Render web service, root directory `gateway`): build `pip install uv && uv sync --frozen --no-dev`, start `uv run --no-sync uvicorn app.main:app --host 0.0.0.0 --port $PORT`, health check `/healthz`.
+- **Dashboard** (Vercel project, root directory `dashboard`).
+- **Database**: create the schema on each Neon branch. Only the gateway connects to it; the dashboard reads and writes through the gateway's `/dashboard/v1` API.
+
+```bash
+cd gateway
+DATABASE_URL='<neon owner connection string>' uv run python scripts/migrate.py
+```
+
+| Where | Variable | Value |
 |---|---|---|
-| gateway | `DATABASE_URL` | Neon **pooled** connection string (`-pooler` host, `?sslmode=require`) |
+| gateway | `DATABASE_URL` | Neon **pooled** owner connection string (`-pooler` host, `?sslmode=require`) |
+| gateway | `GATEWAY_AUTH` | `required` |
+| gateway | `GATEWAY_DASHBOARD_TOKEN` | 32+ random characters; enables the dashboard API (`openssl rand -hex 32`) |
+| gateway | `GATEWAY_ENVIRONMENT` | `production`, `dev`, ... (shown in Sentry) |
 | gateway | `SENTRY_DSN` | DSN of a Sentry project (optional) |
 | gateway | `GROQ_API_KEY`, `OPENROUTER_API_KEY` | provider keys (optional; the mock provider works without them) |
 | gateway | `GATEWAY_DISABLE_MOCK` | `1` once real providers are configured |
-| dashboard | `DATABASE_URL` or `DATABASE_URL_READONLY` | Neon connection string; prefer a read-only role created with `gateway/scripts/dashboard_role.sql` |
-| dashboard | `DASHBOARD_PASSWORD` | admin password, 12+ characters |
+| dashboard | `GATEWAY_URL` | the gateway's public address, e.g. `https://llm-gateway.onrender.com` |
+| dashboard | `GATEWAY_DASHBOARD_TOKEN` | the same value as on the gateway |
 | dashboard | `DASHBOARD_SESSION_SECRET` | 32+ random characters (`openssl rand -hex 32`) |
+| dashboard | `SIGNUP_INVITE_CODE` | 12+ characters; sign-up requires it (`SIGNUP_MODE=open` removes the requirement) |
+| dashboard | `ADMIN_EMAILS` | comma-separated addresses that become admins when they sign up with the code |
+| dashboard | `APP_URL` | the dashboard's public address, used in emailed links |
+| dashboard | `RESEND_API_KEY`, `EMAIL_FROM` | transactional email for address confirmation and password reset |
+| dashboard | `GATEWAY_PUBLIC_URL` | the gateway's public address, shown in the key page's code samples |
 
-Mark every value as Sensitive. On Vercel the gateway requires authentication automatically, so create its first key against the Neon database:
+Mark every value as secret. Open the dashboard, sign up with an admin address and the invite code, create a key under **API keys**, and call the gateway with it. Other users confirm their email address before they can create keys, and can reset a forgotten password by email.
 
-```bash
-cd gateway && DATABASE_URL='<neon connection string>' uv run python scripts/keys.py create --name my-app
-```
-
-The dashboard returns `503` until both dashboard variables are set. The circuit breaker and rate limiter are kept per function instance, so on serverless they are approximate across instances.
+The dashboard returns `503` until `DASHBOARD_SESSION_SECRET` is set, and sign-up stays closed until an invite code is set or `SIGNUP_MODE=open`. Without `RESEND_API_KEY`, set `REQUIRE_EMAIL_VERIFICATION=false` and note that password reset cannot deliver mail.

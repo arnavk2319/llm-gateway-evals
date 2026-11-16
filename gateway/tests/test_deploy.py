@@ -78,8 +78,46 @@ async def test_concurrent_cold_starts_can_all_migrate_the_same_database():
 
     from app.sinks import PostgresSink
 
+
     sinks = [PostgresSink(os.environ["TEST_DATABASE_URL"]) for _ in range(6)]
     try:
         await asyncio.gather(*(s.open(migrate=True) for s in sinks))  # would race without the lock
     finally:
         await asyncio.gather(*(s.close() for s in sinks))
+
+
+def test_render_is_a_long_lived_host_that_still_requires_auth(monkeypatch):
+    """Render runs one process, so events are written in the background; but a public host is never open."""
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.delenv("RENDER", raising=False)
+    assert Settings(api_keys="").auth_required is False
+    monkeypatch.setenv("RENDER", "true")
+    cfg = Settings(api_keys="")
+    assert cfg.auth_required is True
+    assert cfg.emit_events_inline is False
+    assert cfg.debug_enabled is False
+
+
+@pytest.mark.skipif(not __import__("os").environ.get("TEST_DATABASE_URL"), reason="needs Postgres")
+async def test_migration_replaces_a_log_view_with_a_different_column_set():
+    """A release that changes the view's columns must not break startup of one that has not (and vice versa)."""
+    import os
+
+    from app.sinks import PostgresSink
+
+    sink = PostgresSink(os.environ["TEST_DATABASE_URL"])
+    await sink.open(migrate=True)
+    try:
+        async with sink.pool.connection() as conn:
+            await conn.execute("DROP VIEW IF EXISTS log_stream")
+            await conn.execute("CREATE VIEW log_stream AS SELECT 1 AS unrelated, 'x'::text AS other")
+    finally:
+        await sink.close()
+    again = PostgresSink(os.environ["TEST_DATABASE_URL"])
+    await again.open(migrate=True)  # must not raise "cannot drop columns from view"
+    try:
+        async with again.pool.connection() as conn:
+            cur = await conn.execute("SELECT user_id FROM log_stream LIMIT 1")
+            assert cur.description[0].name == "user_id"
+    finally:
+        await again.close()
