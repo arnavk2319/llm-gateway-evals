@@ -38,7 +38,7 @@ from .state import GatewayState
 # Outcome classes the in-request feedback loop may retry on another model.
 RETRYABLE = frozenset(
     {"timeout", "rate_limit", "server_error", "connection", "malformed", "validator_failed", "auth_error",
-     "empty_output", "unsafe_output"}
+     "empty_output", "unsafe_output", "model_unavailable"}
 )
 
 LARGE_PROMPT_CHARS = 50_000
@@ -58,6 +58,16 @@ class Deps:
 
 def _err(status: int, type_: str, message: str, **extra: Any) -> dict[str, Any]:
     return {"status": status, "type": type_, "message": message, **extra}
+
+
+def merge_extra(payload: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    """Add a provider's fixed request fields. They win over the caller's, key by key, even inside nested objects."""
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(payload.get(key), dict):
+            payload[key] = merge_extra(dict(payload[key]), value)
+        else:
+            payload[key] = value
+    return payload
 
 
 def parse_mock_behavior(header: str | None) -> dict[str, str]:
@@ -443,6 +453,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         req = state["request"]
         payload = req.model_dump(exclude_none=True)
         payload["model"] = sel.model
+        merge_extra(payload, policy.providers[sel.provider].request_extra)
         remaining = state["deadline"] - time.monotonic()
         timeout = max(0.5, min(policy.retry.per_attempt_timeout_s, remaining))
         extra: dict[str, Any] = {}

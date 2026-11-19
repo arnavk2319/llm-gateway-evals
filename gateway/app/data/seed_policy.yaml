@@ -24,6 +24,10 @@ providers:
     # Free-tier models are served by third parties that may log or train on prompts, so sensitive
     # requests (see `safety` below) are never sent here. Verify the terms before changing this.
     sensitive_ok: false
+    # Only endpoints OpenRouter classifies as not storing or training on prompts. A model with no such endpoint
+    # answers 404, which the router treats as "unavailable" and falls back. Check with scripts/probe_openrouter.py.
+    request_extra:
+      provider: {data_collection: deny}
     kind: openai_compat
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
@@ -113,16 +117,39 @@ models:
     price: {input_per_1m: 0.80, output_per_1m: 4.00}
     latency_ms_p50: 900
     quality: {default: 0.78, code: 0.80, review: 0.78}
-  - id: openrouter/qwen-2.5-72b
+  # OpenRouter free models: list price is zero, so billed and shadow cost are both 0. Candidates chosen from OpenRouter's
+  # public model list (tools support, large context); confirm each is reachable under data_collection=deny with
+  # scripts/probe_openrouter.py and remove the ones that are not. Quality scores are estimates.
+  - id: openrouter/gemma-4-31b
     provider: openrouter
-    model: "qwen/qwen-2.5-72b-instruct:free"
-    family: qwen
+    model: "google/gemma-4-31b-it:free"
+    family: gemma
     tier: 3
     free: true
-    capabilities: {tools: true, json_mode: true, max_context: 32000}
-    price: {input_per_1m: 0.40, output_per_1m: 0.60}
+    capabilities: {tools: true, json_mode: true, max_context: 262144}
+    price: {input_per_1m: 0.0, output_per_1m: 0.0}
+    latency_ms_p50: 1500
+    quality: {default: 0.80, code: 0.78, review: 0.80}
+  - id: openrouter/gemma-4-26b
+    provider: openrouter
+    model: "google/gemma-4-26b-a4b-it:free"
+    family: gemma
+    tier: 2
+    free: true
+    capabilities: {tools: true, json_mode: true, max_context: 262144}
+    price: {input_per_1m: 0.0, output_per_1m: 0.0}
     latency_ms_p50: 1200
-    quality: {default: 0.84, code: 0.85, review: 0.85}
+    quality: {default: 0.72, code: 0.70}
+  - id: openrouter/nemotron-3.5-super
+    provider: openrouter
+    model: "nvidia/nemotron-3.5-super-vl:free"
+    family: nemotron
+    tier: 3
+    free: true
+    capabilities: {tools: true, json_mode: true, max_context: 1000000}
+    price: {input_per_1m: 0.0, output_per_1m: 0.0}
+    latency_ms_p50: 2000
+    quality: {default: 0.80, code: 0.78, review: 0.80}
 
 task_policies:
   default: {min_tier: 1}
