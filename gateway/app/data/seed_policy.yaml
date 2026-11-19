@@ -78,26 +78,38 @@ models:
     price: {input_per_1m: 0.10, output_per_1m: 0.15}
     latency_ms_p50: 3000
     quality: {default: 0.65, code: 0.70}
-  - id: groq/llama-3.1-8b
+  # Groq: only the gpt-oss models are on this account's plan. Prices are list prices; verify on console.groq.com.
+  - id: groq/gpt-oss-20b
     provider: groq
-    model: llama-3.1-8b-instant
-    family: llama
-    tier: 1
+    model: openai/gpt-oss-20b
+    family: gpt-oss
+    tier: 2
     free: true
-    capabilities: {tools: true, json_mode: true, max_context: 32000}
-    price: {input_per_1m: 0.05, output_per_1m: 0.08}
-    latency_ms_p50: 250
-    quality: {default: 0.55, code: 0.50}
-  - id: groq/llama-3.3-70b
+    capabilities: {tools: true, json_mode: true, max_context: 131072}
+    price: {input_per_1m: 0.075, output_per_1m: 0.30}
+    latency_ms_p50: 400
+    quality: {default: 0.70, code: 0.68}
+  - id: groq/gpt-oss-120b
     provider: groq
-    model: llama-3.3-70b-versatile
-    family: llama
+    model: openai/gpt-oss-120b
+    family: gpt-oss
     tier: 3
     free: true
-    capabilities: {tools: true, json_mode: true, max_context: 32000}
-    price: {input_per_1m: 0.59, output_per_1m: 0.79}
-    latency_ms_p50: 600
-    quality: {default: 0.85, code: 0.84, review: 0.86}
+    capabilities: {tools: true, json_mode: true, max_context: 131072}
+    price: {input_per_1m: 0.15, output_per_1m: 0.75}
+    latency_ms_p50: 700
+    quality: {default: 0.85, code: 0.84, review: 0.85}
+  # Preview on Groq: it may be withdrawn at short notice, so it must never be the only model in its tier.
+  - id: groq/qwen3.8-27b
+    provider: groq
+    model: qwen/qwen3.8-27b
+    family: qwen
+    tier: 2
+    free: true
+    capabilities: {tools: true, json_mode: true, max_context: 131072}
+    price: {input_per_1m: 0.80, output_per_1m: 4.00}
+    latency_ms_p50: 900
+    quality: {default: 0.78, code: 0.80, review: 0.78}
   - id: openrouter/qwen-2.5-72b
     provider: openrouter
     model: "qwen/qwen-2.5-72b-instruct:free"
