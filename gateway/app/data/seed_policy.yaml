@@ -119,8 +119,30 @@ models:
     quality: {default: 0.78, code: 0.80, review: 0.78}
   # OpenRouter free models: list price is zero, so billed and shadow cost are both 0. Probed 2026-11-19 with
   # scripts/probe_openrouter.py under data_collection=deny: every Nvidia Nemotron free model, Liquid LFM 3 and Particle-1
-  # have no endpoint that avoids training, so they are left out; Gemma 4 answered 429 (upstream rate limit, so an
-  # endpoint exists). Re-run the probe before adding or keeping a model. Quality scores are estimates.
+  # have no endpoint that avoids training, so they are left out. Ling 3.2 Flash and Cohere North Mini Code answered with
+  # tool support. Gemma 4 answered 429 on every retry (upstream capacity, so an endpoint exists but it is often busy; the
+  # router falls back). Baidu Ernie 5.5 Flash (a preview served from China) and Recursive Flint answered too and are
+  # left out until wanted. Re-run the probe before adding or keeping a model. Quality scores are estimates.
+  - id: openrouter/ling-3.2-flash
+    provider: openrouter
+    model: "inclusionai/ling-3.2-flash:free"
+    family: ling
+    tier: 2
+    free: true
+    capabilities: {tools: true, json_mode: true, max_context: 1048576}
+    price: {input_per_1m: 0.0, output_per_1m: 0.0}
+    latency_ms_p50: 1000
+    quality: {default: 0.68, code: 0.65}
+  - id: openrouter/north-mini-code
+    provider: openrouter
+    model: "cohere/north-mini-code:free"
+    family: cohere
+    tier: 2
+    free: true
+    capabilities: {tools: true, json_mode: false, max_context: 256000}
+    price: {input_per_1m: 0.0, output_per_1m: 0.0}
+    latency_ms_p50: 700
+    quality: {default: 0.62, code: 0.78, review: 0.72}
   - id: openrouter/gemma-4-31b
     provider: openrouter
     model: "google/gemma-4-31b-it:free"
