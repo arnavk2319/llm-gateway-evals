@@ -88,6 +88,18 @@ CREATE TABLE IF NOT EXISTS routing_policy (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS routing_policy_one_active ON routing_policy ((status)) WHERE status = 'active';
 
+-- What a version is and where it came from: used by the policy registry API and the dashboard.
+-- content_hash fingerprints the routing content (not the version number), so an unchanged file is never re-published.
+ALTER TABLE routing_policy ADD COLUMN IF NOT EXISTS content_hash  text;
+ALTER TABLE routing_policy ADD COLUMN IF NOT EXISTS model_count   integer;
+ALTER TABLE routing_policy ADD COLUMN IF NOT EXISTS source        text;     -- seed | file_sync | push_policy | api
+ALTER TABLE routing_policy ADD COLUMN IF NOT EXISTS app_version   text;     -- gateway version that published it
+ALTER TABLE routing_policy ADD COLUMN IF NOT EXISTS release       text;     -- git commit of that deploy
+ALTER TABLE routing_policy ADD COLUMN IF NOT EXISTS git_branch    text;
+ALTER TABLE routing_policy ADD COLUMN IF NOT EXISTS notes         text;
+ALTER TABLE routing_policy ADD COLUMN IF NOT EXISTS external_refs jsonb NOT NULL DEFAULT '{}'::jsonb;
+CREATE INDEX IF NOT EXISTS routing_policy_hash_idx ON routing_policy (content_hash);
+
 -- ---------------------------------------------------------------------------
 -- API keys (only a SHA-256 hash of each key is stored)
 -- ---------------------------------------------------------------------------

@@ -20,9 +20,11 @@ class EventSink(Protocol):
     async def write_logs(self, logs: list[LogEvent]) -> None: ...
     async def get_span_model(self, span_id: str) -> tuple[str, str] | None: ...
     async def load_active_policy(self) -> tuple[int, dict[str, Any]] | None: ...
+    async def active_policy_origin(self) -> tuple[int, str | None] | None: ...
     async def save_policy(
         self, body: dict[str, Any], status: str = "active", created_by: str = "manual",
-        parent_version: int | None = None,
+        parent_version: int | None = None, *, meta: dict[str, Any] | None = None,
+        if_active_is: int | None = None,
     ) -> int: ...
     # API keys
     async def get_api_key(self, key_hash: str) -> dict[str, Any] | None: ...
@@ -49,7 +51,12 @@ class NullSink:
     async def load_active_policy(self) -> tuple[int, dict[str, Any]] | None:
         return None
 
-    async def save_policy(self, body, status="active", created_by="manual", parent_version=None) -> int:
+    async def active_policy_origin(self) -> tuple[int, str | None] | None:
+        return None
+
+    async def save_policy(
+        self, body, status="active", created_by="manual", parent_version=None, *, meta=None, if_active_is=None
+    ) -> int:
         raise NotImplementedError
 
     async def get_api_key(self, key_hash: str) -> dict[str, Any] | None:
@@ -259,26 +266,46 @@ class PostgresSink:
             row = await cur.fetchone()
         return (row[0], row[1]) if row else None
 
+    async def active_policy_origin(self) -> tuple[int, str | None] | None:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT version, created_by FROM routing_policy WHERE status = 'active' ORDER BY version DESC LIMIT 1"
+            )
+            row = await cur.fetchone()
+        return (row[0], row[1]) if row else None
+
     async def save_policy(
         self, body: dict[str, Any], status: str = "active", created_by: str = "manual",
-        parent_version: int | None = None,
+        parent_version: int | None = None, *, meta: dict[str, Any] | None = None,
+        if_active_is: int | None = None,
     ) -> int:
+        """Insert a version. `if_active_is` makes a publish conditional: when another instance has already
+        replaced that version, nothing is written and the version now active is returned instead."""
         from psycopg.types.json import Jsonb
 
+        m = meta or {}
         activated = datetime.now(UTC) if status == "active" else None
         async with self._pool.connection() as conn, conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(727276)")  # one publisher at a time
+            if if_active_is is not None:
+                cur = await conn.execute("SELECT version FROM routing_policy WHERE status = 'active'")
+                current = await cur.fetchone()
+                if current is not None and current[0] != if_active_is:
+                    return int(current[0])
             if status == "active":
-                await conn.execute(
-                    "UPDATE routing_policy SET status = 'retired' WHERE status = 'active'"
-                )
+                await conn.execute("UPDATE routing_policy SET status = 'retired' WHERE status = 'active'")
             cur = await conn.execute(
-                """INSERT INTO routing_policy (status, body, parent_version, created_by, activated_at)
-                       VALUES (%s, %s, %s, %s, %s) RETURNING version""",
-                (status, Jsonb(body), parent_version, created_by, activated),
+                """INSERT INTO routing_policy (status, body, parent_version, created_by, activated_at,
+                                               content_hash, model_count, source, app_version, release,
+                                               git_branch, notes, external_refs)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING version""",
+                (status, Jsonb(body), parent_version, created_by, activated, m.get("content_hash"),
+                 m.get("model_count"), m.get("source"), m.get("app_version"), m.get("release"),
+                 m.get("git_branch"), m.get("notes"), Jsonb(m.get("external_refs") or {})),
             )
             row = await cur.fetchone()
         assert row is not None
-        return row[0]
+        return int(row[0])
 
     # ---- API keys -----------------------------------------------------------
 

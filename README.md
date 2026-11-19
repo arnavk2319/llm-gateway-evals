@@ -13,7 +13,7 @@ An OpenAI-compatible gateway that routes each LLM call to the right model for th
 - **Cost tracking.** Real cost plus a "shadow" cost at list price, so free-tier and local models still produce meaningful numbers.
 - **One searchable log stream.** Every event is tagged, timestamped and tied to its agent run and call, so any request can be traced end to end. Filter by source, severity, kind or any tag, open a run to see its calls and events together, and export to CSV, JSON or JSONL.
 - **Error reporting.** Failures are reported to Sentry (or a Sentry-compatible server) with the same tags and ids as the log stream, and each log row links back to its Sentry event.
-- **Versioned routing policy.** Routing behavior lives in a policy you can update without redeploying.
+- **Versioned routing policy.** Routing behavior lives in a policy you can update without redeploying. A changed `seed_policy.yaml` is published as a new version on the next start, and every version records its gateway version, release, model count, notes and external references; a token-gated API lists, creates, promotes and rolls back versions.
 - **Dashboard.** Cost, latency, errors, fallbacks and recent requests by model, node role and task type, with log search and exports. Each user sees only the calls made with their own keys; admins see everything and can disable users.
 - **Deploys on Render or Vercel with Neon Postgres.** Runs as a long-lived web service or serverless: events are written before each response returns where needed, concurrent cold starts migrate the schema safely, and Sentry events are flushed before the function is frozen.
 - **Providers.** Ollama, Groq, OpenRouter and any other OpenAI-compatible API, plus a mock provider for local development and tests.
@@ -74,7 +74,7 @@ The mock provider is on by default, so everything works without API keys. To use
 | OpenRouter | `OPENROUTER_API_KEY` | optional `OPENROUTER_API_KEY_2` |
 | Hide the mock models | `GATEWAY_DISABLE_MOCK=1` | once real providers are configured |
 
-Model ids and prices are defined in `gateway/app/data/seed_policy.yaml`; verify them against each provider before relying on them.
+Model ids and prices are defined in `gateway/app/data/seed_policy.yaml`; verify them against each provider before relying on them. Edit the file and deploy: the gateway publishes the change as a new policy version when it starts (it never replaces a version published through the API).
 
 ### Error reporting
 

@@ -12,12 +12,14 @@ import hmac
 import logging
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .config import Settings
 from .dashboard_store import SEVERITIES, DashboardStore
+from .policy import Policy
+from .policy_registry import PolicyRegistry
 
 log = logging.getLogger("gateway.dashboard")
 
@@ -26,6 +28,7 @@ KEY_ID = r"^key_[a-f0-9]{12}$"
 HASH = r"^[a-f0-9]{64}$"
 
 UserId = Annotated[str, Field(pattern=USER_ID)]
+Version = Annotated[int, Path(ge=1)]
 Hours = Annotated[int, Query(ge=1, le=720)]
 Scope = Annotated[str | None, Query(alias="user", pattern=USER_ID, description="omit for the admin (all users) view")]
 
@@ -111,18 +114,40 @@ class LogQuery(_Body):
     limit: int = Field(default=100, ge=1, le=50_000)  # exports ask for a lot
 
 
+REF_KEY = r"^[A-Za-z0-9_.\-]{1,40}$"
+ExternalRefs = Annotated[dict[Annotated[str, Field(pattern=REF_KEY)], Annotated[str, Field(max_length=200)]], Field(max_length=20)]
+
+
+class NewPolicy(_Body):
+    policy: dict[str, Any]
+    activate: bool = False  # a new version is a draft unless this says otherwise
+    notes: str | None = Field(default=None, max_length=1000)
+    externalRefs: ExternalRefs = Field(default_factory=dict)
+
+
+class PolicyMeta(_Body):
+    notes: str | None = Field(default=None, max_length=1000)
+    externalRefs: ExternalRefs | None = None  # replaces the whole map when present
+
+
 def build_router(settings: Settings) -> APIRouter:
     token = (settings.dashboard_token or "").encode()
 
-    async def authorize(request: Request) -> DashboardStore:
+    def _sink(request: Request) -> Any:
         header = request.headers.get("authorization", "")
         supplied = header[7:].strip().encode() if header[:7].lower() == "bearer " else b""
         if not supplied or not hmac.compare_digest(supplied, token):
             raise HTTPException(status_code=401, detail="unauthorized", headers={"www-authenticate": "Bearer"})
-        pool = getattr(request.app.state.rt.sink, "pool", None)
-        if pool is None:
+        sink = request.app.state.rt.sink
+        if getattr(sink, "pool", None) is None:
             raise _error(503, "the dashboard API needs the Postgres sink")
-        return DashboardStore(pool)
+        return sink
+
+    async def authorize(request: Request) -> DashboardStore:
+        return DashboardStore(_sink(request).pool)
+
+    async def registry(request: Request) -> PolicyRegistry:
+        return PolicyRegistry(_sink(request))
 
     router = APIRouter(prefix="/dashboard/v1", tags=["dashboard"])
 
@@ -239,6 +264,63 @@ def build_router(settings: Settings) -> APIRouter:
             "defaultRpm": min(settings.key_default_rpm, settings.key_max_rpm),
             "maxRpm": settings.key_max_rpm,
         })
+
+    # ---- routing policy registry --------------------------------------------------------------------
+
+    @router.get("/policies")
+    async def list_policies(reg: PolicyRegistry = Depends(registry), limit: Annotated[int, Query(ge=1, le=500)] = 100):
+        return ok(await reg.list(limit))
+
+    @router.get("/policies/active")
+    async def active_policy(reg: PolicyRegistry = Depends(registry)):
+        found = await reg.active()
+        if found is None:
+            raise _error(404, "no active policy")
+        return ok(found)
+
+    @router.get("/policies/{version}")
+    async def get_policy(version: Version, reg: PolicyRegistry = Depends(registry), body: bool = True):
+        found = await reg.get(version, body)
+        if found is None:
+            raise _error(404, "no such policy version")
+        return ok(found)
+
+    @router.post("/policies")
+    async def create_policy(body: NewPolicy, reg: PolicyRegistry = Depends(registry)):
+        try:
+            policy = Policy.model_validate(body.policy)
+        except ValidationError as e:
+            first = e.errors()[0]
+            raise _error(422, f"invalid policy: {'.'.join(str(p) for p in first['loc'])}: {first['msg']}") from None
+        unknown = sorted({m.provider for m in policy.models} - set(policy.providers))
+        if not policy.models or unknown:
+            raise _error(422, "invalid policy: needs at least one model, each with a provider listed in `providers`"
+                         + (f" (unknown: {', '.join(unknown)})" if unknown else ""))
+        return ok(await reg.create(policy, activate=body.activate, notes=body.notes, external_refs=body.externalRefs), 201)
+
+    @router.patch("/policies/{version}")
+    async def update_policy(version: Version, body: PolicyMeta, reg: PolicyRegistry = Depends(registry)):
+        updated = await reg.update_meta(
+            version, notes=body.notes, set_notes="notes" in body.model_fields_set, external_refs=body.externalRefs
+        )
+        if updated is None:
+            raise _error(404, "no such policy version")
+        return ok(updated)
+
+    @router.post("/policies/{version}/activate")
+    async def activate_policy(version: Version, reg: PolicyRegistry = Depends(registry)):
+        if await reg.activate(version) == "not_found":
+            raise _error(404, "no such policy version")
+        return ok(await reg.get(version, False))
+
+    @router.delete("/policies/{version}")
+    async def delete_policy(version: Version, reg: PolicyRegistry = Depends(registry)):
+        outcome = await reg.delete(version)
+        if outcome == "not_found":
+            raise _error(404, "no such policy version")
+        if outcome == "not_deletable":
+            raise _error(409, "only drafts can be deleted; a published version stays for the audit trail")
+        return ok({"ok": True})
 
     # ---- analytics and logs -----------------------------------------------------------------------
 
