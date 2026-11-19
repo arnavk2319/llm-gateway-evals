@@ -12,19 +12,17 @@ never printed. Needs network access; each call is a single short completion (fre
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
+
+import httpx
 
 BASE = "https://openrouter.ai/api/v1"
 
 
 def free_models() -> list[str]:
-    with urllib.request.urlopen(BASE + "/models", timeout=30) as r:
-        data = json.load(r)["data"]
+    data = httpx.get(BASE + "/models", timeout=30).raise_for_status().json()["data"]
     return sorted(
         m["id"] for m in data
         if m["id"].endswith(":free") and str(m["pricing"].get("prompt")) == "0" and str(m["pricing"].get("completion")) == "0"
@@ -42,7 +40,7 @@ def probe(model: str, key: str, *, tools: bool, attempts: int = 3) -> tuple[str,
 
 
 def _probe_once(model: str, key: str, *, tools: bool) -> tuple[str, float, str]:
-    body = {
+    body: dict = {
         "model": model,
         "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
         "max_tokens": 400,  # reasoning models spend tokens thinking before they answer; 64 often returns nothing
@@ -50,27 +48,25 @@ def _probe_once(model: str, key: str, *, tools: bool) -> tuple[str, float, str]:
     }
     if tools:
         body["tools"] = [{"type": "function", "function": {"name": "ping", "description": "ping", "parameters": {"type": "object", "properties": {}}}}]
-    req = urllib.request.Request(
-        BASE + "/chat/completions", data=json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-    )
     t0 = time.perf_counter()
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            out = json.load(r)
-        msg = (out.get("choices") or [{}])[0].get("message") or {}
-        got = (msg.get("content") or "").strip()
-        if got:
-            return "OK", time.perf_counter() - t0, got[:40]
-        if msg.get("tool_calls"):
-            return "OK", time.perf_counter() - t0, "(tool call)"
-        return "OK BUT EMPTY REPLY", time.perf_counter() - t0, "the router would treat this reply as empty and fall back"
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode(errors="replace")[:160].replace("\n", " ")
-        label = {404: "NO ENDPOINT under data_collection=deny", 429: "RATE LIMITED", 402: "NEEDS CREDITS"}.get(e.code, f"HTTP {e.code}")
-        return label, time.perf_counter() - t0, detail
-    except Exception as e:  # network trouble
+        resp = httpx.post(BASE + "/chat/completions", json=body, headers={"Authorization": f"Bearer {key}"}, timeout=60)
+    except httpx.HTTPError as e:  # network trouble
         return "ERROR", time.perf_counter() - t0, repr(e)[:160]
+    secs = time.perf_counter() - t0
+    if resp.status_code >= 400:
+        detail = resp.text[:160].replace("\n", " ")
+        label = {404: "NO ENDPOINT under data_collection=deny", 429: "RATE LIMITED", 402: "NEEDS CREDITS"}.get(
+            resp.status_code, f"HTTP {resp.status_code}"
+        )
+        return label, secs, detail
+    msg = (resp.json().get("choices") or [{}])[0].get("message") or {}
+    got = (msg.get("content") or "").strip()
+    if got:
+        return "OK", secs, got[:40]
+    if msg.get("tool_calls"):
+        return "OK", secs, "(tool call)"
+    return "OK BUT EMPTY REPLY", secs, "the router would treat this reply as empty and fall back"
 
 
 def main(argv: list[str]) -> None:
