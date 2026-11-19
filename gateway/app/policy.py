@@ -50,6 +50,9 @@ class ProviderSpec(BaseModel):
     # Optional second key for zero-downtime rotation / failover on a 401 or 403.
     api_key_env_secondary: str | None = None
     requires_env: list[str] = Field(default_factory=list)
+    # May this provider receive requests marked sensitive (personal data, or the caller said so)? Set it to
+    # false for sources that log or train on prompts, such as free tiers. Verify each provider's terms.
+    sensitive_ok: bool = True
     # Provider is hidden when any of these env vars is set (e.g. disable mock).
     disabled_if_env: list[str] = Field(default_factory=list)
 
@@ -85,6 +88,25 @@ class Weights(BaseModel):
     quality: float = 0.55
 
 
+class InputSafety(BaseModel):
+    secrets: Literal["block", "redact", "allow"] = "redact"  # API keys, private keys, connection strings
+    pii: Literal["sensitive", "redact", "block", "allow"] = "sensitive"  # email, card number, SSN
+    injection: Literal["warn", "block", "allow"] = "warn"  # known prompt-injection phrases (heuristic)
+
+
+class OutputSafety(BaseModel):
+    leaked_secrets: Literal["redact", "fallback", "allow"] = "redact"
+    empty: Literal["fallback", "allow"] = "fallback"  # no text and no tool call
+
+
+class Safety(BaseModel):
+    """What the router checks before a call and on the reply. Not applied to streamed replies."""
+
+    enabled: bool = True
+    input: InputSafety = Field(default_factory=InputSafety)
+    output: OutputSafety = Field(default_factory=OutputSafety)
+
+
 class LLMClassify(BaseModel):
     enabled: bool = False
     threshold: float = 0.7
@@ -102,6 +124,7 @@ class Policy(BaseModel):
     weights: Weights = Field(default_factory=Weights)
     retry: RetryPolicy = Field(default_factory=RetryPolicy)
     llm_classify: LLMClassify = Field(default_factory=LLMClassify)
+    safety: Safety = Field(default_factory=Safety)
 
     def task_policy(self, task_type: str) -> TaskPolicy:
         return self.task_policies.get(task_type) or self.task_policies.get("default") or TaskPolicy()

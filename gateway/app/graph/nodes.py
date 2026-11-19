@@ -22,12 +22,16 @@ from ..providers.base import CallOutcome
 from ..providers.health import ProviderHealth
 from ..providers.registry import ProviderRegistry
 from ..router import select_route
+from ..safety import message_chars, redact, redact_messages, reply_is_empty, scan, scan_messages
 from .state import GatewayState
 
 # Outcome classes the in-request feedback loop may retry on another model.
 RETRYABLE = frozenset(
-    {"timeout", "rate_limit", "server_error", "connection", "malformed", "validator_failed", "auth_error"}
+    {"timeout", "rate_limit", "server_error", "connection", "malformed", "validator_failed", "auth_error",
+     "empty_output", "unsafe_output"}
 )
+
+LARGE_PROMPT_CHARS = 50_000
 
 Node = Callable[[GatewayState], Awaitable[dict[str, Any]]]
 
@@ -66,6 +70,8 @@ def _headers(state: GatewayState) -> dict[str, str]:
     if sel:
         h["x-gateway-model"] = sel.primary.id
         h["x-gateway-route-reason"] = sel.reason.encode("ascii", "replace").decode()[:300]
+    if state.get("safety_notes"):
+        h["x-gateway-safety"] = ";".join(state["safety_notes"])[:200]
     return h
 
 
@@ -87,9 +93,35 @@ def _validate(state: GatewayState, o: CallOutcome) -> str:
     return "ok"
 
 
+def _check_output(state: GatewayState, o: CallOutcome, notes: list[str]) -> str:
+    """The safety gate's output half (non-streamed replies only): an empty reply, or a secret in the reply."""
+    rules = state["policy"].safety
+    body = o.body or {}
+    if not rules.enabled:
+        return "ok"
+    if rules.output.empty == "fallback" and reply_is_empty(body):
+        return "empty_output"
+    choices = body.get("choices")
+    msg = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+    leaks = (
+        isinstance(msg, dict) and isinstance(msg.get("content"), str)
+        and rules.output.leaked_secrets != "allow" and bool(scan(msg["content"]).secrets)
+    )
+    if leaks and isinstance(msg, dict):
+        if rules.output.leaked_secrets == "fallback":
+            return "unsafe_output"
+        msg["content"] = redact(msg["content"], secrets=True)
+        notes.append("redacted:reply-secrets")
+    return "ok"
+
+
 # ---- conditional edge functions (pure) ------------------------------------
 
 def c_valid(state: GatewayState) -> str:
+    return "respond_error" if state.get("error") else "guard"
+
+
+def c_guard(state: GatewayState) -> str:
     return "respond_error" if state.get("error") else "profile"
 
 
@@ -196,6 +228,68 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
                                    error_class="invalid_request")
         return update
 
+    async def guard(state: GatewayState) -> dict[str, Any]:
+        """The safety gate's input half: look at what is about to leave, then block, redact or mark it sensitive."""
+        policy_safety = state["policy"].safety
+        update: dict[str, Any] = {"sensitive": False, "safety_notes": []}
+        if not policy_safety.enabled:
+            return update
+        rules = policy_safety.input
+        msgs = state["request"].messages
+        # Regex work on a very large prompt would hold the event loop; hand it to a thread (GIL switching keeps
+        # other requests moving). A typical prompt takes about 0.1 ms and stays inline.
+        found = await asyncio.to_thread(scan_messages, msgs) if message_chars(msgs) > LARGE_PROMPT_CHARS else scan_messages(msgs)
+        notes: list[str] = []
+        logs: list[LogEvent] = []
+        sensitive = state["headers"].get("x-gateway-sensitivity", "").strip().lower() == "sensitive"
+        if sensitive:
+            notes.append("sensitive:requested")
+        redact_secrets = redact_pii = False
+
+        def blocked(what: str, kinds: Any) -> dict[str, Any]:
+            names = ", ".join(sorted(kinds)) or what
+            logs.append(stamped(state, "input_blocked", "warn", f"request blocked by the safety gate: {what}",
+                                tags={"reason": what, "kinds": names}, fingerprint=f"input-blocked:{what}"))
+            return {**update, "safety_notes": [*notes, f"blocked:{what}"], "log_events": state.get("log_events", []) + logs,
+                    "error": _err(400, "safety_error",
+                                  f"The request was blocked: it appears to contain {what} ({names}). Remove it and retry.",
+                                  error_class="input_blocked")}
+
+        if found.secrets:
+            if rules.secrets == "block":
+                return blocked("a secret", found.secrets)
+            if rules.secrets == "redact":
+                redact_secrets = True
+                notes.append("redacted:secrets")
+        if found.pii:
+            if rules.pii == "block":
+                return blocked("personal data", found.pii)
+            if rules.pii == "redact":
+                redact_pii = True
+                notes.append("redacted:pii")
+            elif rules.pii == "sensitive":
+                sensitive = True
+                notes.append("sensitive:pii")
+        if found.injection:
+            if rules.injection == "block":
+                return blocked("a prompt-injection phrase", {"injection"})
+            if rules.injection == "warn":
+                notes.append("flagged:injection")
+        if found.any:
+            logs.append(stamped(
+                state, "input_guard", "info", "safety gate acted on the request: " + (", ".join(notes) or "noted only"),
+                tags={"secret_kinds": ",".join(sorted(found.secrets)), "pii_kinds": ",".join(sorted(found.pii)),
+                      "injection": bool(found.injection), "sensitive": sensitive}))
+        if redact_secrets or redact_pii:
+            cleaned = (
+                await asyncio.to_thread(redact_messages, msgs, secrets=redact_secrets, pii=redact_pii)
+                if message_chars(msgs) > LARGE_PROMPT_CHARS
+                else redact_messages(msgs, secrets=redact_secrets, pii=redact_pii)
+            )
+            update["request"] = state["request"].model_copy(update={"messages": cleaned})
+        update.update({"sensitive": sensitive, "safety_notes": notes, "log_events": state.get("log_events", []) + logs})
+        return update
+
     async def profile(state: GatewayState) -> dict[str, Any]:
         try:
             p = build_profile(
@@ -289,7 +383,20 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
             env=os.environ,
             allowed=set(allowed) if allowed else None,
             unhealthy=deps.health.open_providers(),
+            sensitive=bool(state.get("sensitive")),
         )
+        if decision is None and state.get("sensitive") and not state.get("attempts"):
+            # Distinguish "nothing fits" from "something fits, but no provider is cleared to see this content".
+            without = select_route(
+                state["policy"], state["task_profile"], node_role=state.get("node_role", "unknown"), parent=parent,
+                pinned=state.get("pinned"), stream=bool(state["request"].stream), env=os.environ,
+                allowed=set(allowed) if allowed else None, unhealthy=deps.health.open_providers(),
+            )
+            if without is not None:
+                return {"error": _err(
+                    422, "safety_error",
+                    "This request contains sensitive content and no provider cleared for it can serve it.",
+                    error_class="no_eligible_provider")}
         if decision is None:
             attempts = state.get("attempts", [])
             if attempts:
@@ -330,8 +437,11 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         o = cast(CallOutcome, state["outcome"])
         sel = state["selected_route"].primary
         cls = "ok" if o.ok else (o.error_class or "internal")
+        out_notes: list[str] = []
         if o.ok and not state["request"].stream:
             cls = _validate(state, o)
+            if cls == "ok":
+                cls = _check_output(state, o, out_notes)
         prev = state["attempts"][-1]["outcome_class"] if state["attempts"] else None
         attempt = {
             "attempt_no": len(state["attempts"]) + 1,
@@ -358,10 +468,14 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
                 tags={"provider": sel.provider, "model": sel.id},
                 fingerprint=f"key-failover:{sel.provider}"))
 
+        if out_notes:
+            new_logs.append(stamped(state, "output_guard", "warn", "safety gate acted on the reply: " + ", ".join(out_notes),
+                                    tags={"model": sel.id, "provider": sel.provider}))
         return {
             "outcome_class": cls,
             "attempts": state["attempts"] + [attempt],
             "log_events": state.get("log_events", []) + new_logs,
+            "safety_notes": state.get("safety_notes", []) + out_notes if cls == "ok" else state.get("safety_notes", []),
         }
 
     async def update_context(state: GatewayState) -> dict[str, Any]:
@@ -425,7 +539,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         return {"final": final}
 
     return {
-        "intake": intake, "profile": profile, "llm_classify": llm_classify, "route": route,
+        "intake": intake, "guard": guard, "profile": profile, "llm_classify": llm_classify, "route": route,
         "call": call, "evaluate": evaluate, "update_context": update_context,
         "respond": respond, "respond_error": respond_error,
     }
