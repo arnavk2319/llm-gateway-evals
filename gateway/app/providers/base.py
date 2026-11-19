@@ -19,8 +19,10 @@ def normalize_usage(u: dict[str, Any] | None) -> dict[str, int]:
 
 
 def classify_status(code: int) -> str:
-    if code in (401, 403):
+    if code in (401, 402, 403):  # 402: the account is out of credit, which is a provider-wide problem like a bad key
         return "auth_error"
+    if code == 404:  # the provider has no such model (or, on OpenRouter, no endpoint matching our data policy)
+        return "model_unavailable"
     if code == 429:
         return "rate_limit"
     if code in (408, 504):

@@ -72,7 +72,7 @@ The mock provider is on by default, so everything works without API keys. To use
 |---|---|---|
 | Ollama (local) | `OLLAMA_ENABLED=1` | requires a running `ollama serve` |
 | Groq | `GROQ_API_KEY` | optional `GROQ_API_KEY_2` for rotation and failover |
-| OpenRouter | `OPENROUTER_API_KEY` | optional `OPENROUTER_API_KEY_2` |
+| OpenRouter | `OPENROUTER_API_KEY` | optional `OPENROUTER_API_KEY_2`; free models only, always sent `provider.data_collection=deny`, never given sensitive requests; `scripts/probe_openrouter.py` checks which free models your account can use |
 | Hide the mock models | `GATEWAY_DISABLE_MOCK=1` | once real providers are configured |
 
 Model ids and prices are defined in `gateway/app/data/seed_policy.yaml`; verify them against each provider before relying on them. Edit the file and deploy: the gateway publishes the change as a new policy version when it starts (it never replaces a version published through the API).

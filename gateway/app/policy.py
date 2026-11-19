@@ -53,6 +53,9 @@ class ProviderSpec(BaseModel):
     # May this provider receive requests marked sensitive (personal data, or the caller said so)? Set it to
     # false for sources that log or train on prompts, such as free tiers. Verify each provider's terms.
     sensitive_ok: bool = True
+    # Fields added to every request sent to this provider, for provider-specific controls (for OpenRouter,
+    # `provider: {data_collection: deny}`). The policy wins: a caller cannot override these.
+    request_extra: dict[str, Any] = Field(default_factory=dict)
     # Provider is hidden when any of these env vars is set (e.g. disable mock).
     disabled_if_env: list[str] = Field(default_factory=list)
 
