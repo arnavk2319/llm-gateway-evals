@@ -35,7 +35,7 @@ export async function POST(req: Request) {
   // Not signed-in-and-stuck if the email fails: the account page offers "send again".
   if (!user.verified) await issueLink(user, "verify").catch(() => undefined);
 
-  const res = NextResponse.redirect(new URL(user.verified ? "/keys" : "/account?notice=check-email", req.url), 303);
+  const res = NextResponse.redirect(new URL(user.verified ? "/access/keys" : "/account?notice=check-email", req.url), 303);
   const c = await sessionCookie(user.id, req);
   res.cookies.set(c.name, c.value, c.options);
   return res;

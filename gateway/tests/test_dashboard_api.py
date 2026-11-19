@@ -368,6 +368,10 @@ async def test_each_user_sees_only_their_own_calls_and_logs_an_admin_sees_all(pg
     assert [m["key"] for m in dash_a["byModel"]] == [f"model-a-{tag}"] and dash_a["kpis"]["requests"] == 1
     dash_all = (await c.get("/dashboard/v1/analytics?hours=1", headers=AUTH)).json()
     assert f"model-b-{tag}" in [m["key"] for m in dash_all["byModel"]]
+    # The chart series: one-minute bars for a one-hour window, scoped like everything else.
+    assert dash_a["bucket"] == "minute" and sum(p["requests"] for p in dash_a["series"]) == 1
+    assert (await c.get(f"/dashboard/v1/analytics?hours=24&user={alice}", headers=AUTH)).json()["bucket"] == "hour"
+    assert (await c.get("/dashboard/v1/analytics?hours=720", headers=AUTH)).json()["bucket"] == "day"
 
     exported = (await c.get(f"/dashboard/v1/exports/spans?hours=1&user={alice}", headers=AUTH)).json()
     assert [r["span_id"] for r in exported] == [f"span_{tag}a"]

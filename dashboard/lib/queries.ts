@@ -45,8 +45,14 @@ export type RecentRow = {
 };
 export type PolicyInfo = { version: number; createdAt: string } | null;
 
+export type SeriesPoint = { at: string; requests: number; fallbacks: number };
+export type Bucket = "minute" | "hour" | "day";
+
 export type Dashboard = {
   hours: number;
+  /** Bar size for `series`: a minute for a one-hour window, an hour up to a week, otherwise a day. */
+  bucket: Bucket;
+  series: SeriesPoint[];
   kpis: Kpis;
   byModel: GroupRow[];
   byRole: GroupRow[];
