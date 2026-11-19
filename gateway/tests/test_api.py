@@ -179,7 +179,7 @@ async def test_confident_requests_skip_the_llm_branch(tmp_path, seed_policy_dict
 async def test_models_and_health_endpoints(gw):
     c, _ = gw
     ids = [m["id"] for m in (await c.get("/v1/models")).json()["data"]]
-    assert ids[0] == "auto" and "mock/small" in ids and "groq/llama-3.3-70b" not in ids
+    assert ids[0] == "auto" and "mock/small" in ids and "groq/gpt-oss-120b" not in ids
     h = (await c.get("/healthz")).json()
     assert h["ok"] and h["policy_version"] == 1
 
