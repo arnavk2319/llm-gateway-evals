@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { decideSignup, normalizeEmail, signupConfig, startsVerified, validateCredentials, verificationRequired } from "./accounts.ts";
 import { hashPassword, verifyPassword } from "./password.ts";
 
-const prod = { NODE_ENV: "production", SIGNUP_INVITE_CODE: "let-me-in-please", ADMIN_EMAILS: "Boss@Example.com" };
+const prod = { NODE_ENV: "production", SIGNUP_INVITE_CODE: "let-me-in-please" };
 
 test("production sign-up is closed unless configured", () => {
   assert.equal(signupConfig({ NODE_ENV: "production" }).mode, "closed");
@@ -16,17 +16,21 @@ test("production sign-up is closed unless configured", () => {
 
 test("invite mode needs the code; closed mode lets nobody in", () => {
   const cfg = signupConfig(prod);
-  assert.deepEqual(decideSignup(cfg, "a@b.co", "let-me-in-please"), { ok: true, role: "user" });
-  assert.deepEqual(decideSignup(cfg, "a@b.co", "wrong"), { ok: false, error: "invite" });
-  assert.deepEqual(decideSignup(cfg, "a@b.co", ""), { ok: false, error: "invite" });
-  assert.deepEqual(decideSignup(signupConfig({ NODE_ENV: "production" }), "a@b.co", "anything"), { ok: false, error: "closed" });
+  assert.deepEqual(decideSignup(cfg, "let-me-in-please"), { ok: true, adminInvite: true });
+  assert.deepEqual(decideSignup(cfg, "wrong"), { ok: false, error: "invite" });
+  assert.deepEqual(decideSignup(cfg, ""), { ok: false, error: "invite" });
+  assert.deepEqual(decideSignup(signupConfig({ NODE_ENV: "production" }), "anything"), { ok: false, error: "closed" });
 });
 
-test("admin needs the admin email AND the code, even when sign-up is open", () => {
+test("an admin invite is only reported when the code is right, even when sign-up is open", () => {
   const open = signupConfig({ ...prod, SIGNUP_MODE: "open" });
-  assert.deepEqual(decideSignup(open, "boss@example.com", "let-me-in-please"), { ok: true, role: "admin" });
-  assert.deepEqual(decideSignup(open, "boss@example.com", ""), { ok: true, role: "user" }); // squatting the address gets nothing
-  assert.deepEqual(decideSignup(open, "other@example.com", "let-me-in-please"), { ok: true, role: "user" });
+  assert.deepEqual(decideSignup(open, "let-me-in-please"), { ok: true, adminInvite: true });
+  assert.deepEqual(decideSignup(open, ""), { ok: true, adminInvite: false });
+  assert.deepEqual(decideSignup(open, "guess"), { ok: true, adminInvite: false });
+});
+
+test("the dashboard no longer knows who the admins are", () => {
+  assert.ok(!("adminEmails" in signupConfig({ ...prod, ADMIN_EMAILS: "boss@example.com" })));
 });
 
 test("credentials are validated", () => {
@@ -48,10 +52,9 @@ test("passwords are salted, verified, and malformed hashes fail closed", async (
   }
 });
 
-test("only admins and verification-off deployments start verified", () => {
+test("only verification-off deployments start verified (the gateway verifies admins itself)", () => {
   assert.equal(verificationRequired({}), true);
   assert.equal(verificationRequired({ REQUIRE_EMAIL_VERIFICATION: "false" }), false);
-  assert.equal(startsVerified("user", {}), false);
-  assert.equal(startsVerified("admin", {}), true);
-  assert.equal(startsVerified("user", { REQUIRE_EMAIL_VERIFICATION: "false" }), true);
+  assert.equal(startsVerified({}), false);
+  assert.equal(startsVerified({ REQUIRE_EMAIL_VERIFICATION: "false" }), true);
 });

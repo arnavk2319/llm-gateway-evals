@@ -16,11 +16,13 @@ import secrets
 import pytest
 from conftest import make_gateway
 
+from app.admins import admin_hash
 from app.auth import hash_key
 from app.sinks import PostgresSink
 
 TOKEN = "t" * 40
 AUTH = {"authorization": f"Bearer {TOKEN}"}
+ADMIN_KEY = "k" * 40  # the secret behind the admin allowlist
 FAKE_HASH = "scrypt$" + "x" * 40  # the dashboard hashes passwords; the gateway only stores the string
 PG = pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL not set")
 
@@ -71,6 +73,8 @@ async def pg():
     async with make_gateway(
         sink_obj=sink, sink="postgres", database_url=dsn, dashboard_token=TOKEN,
         key_max_per_user=3, key_default_rpm=60, key_max_rpm=120,
+        admin_hash_key=ADMIN_KEY,
+        admin_email_hashes=",".join(admin_hash(f"{n}-{tag}@example.com", ADMIN_KEY) for n in ("dave", "boss")),
     ) as (c, _):
         try:
             yield c, sink, tag
@@ -87,10 +91,10 @@ async def pg():
                 await conn.execute("DELETE FROM users WHERE email LIKE %s", (like,))
 
 
-async def signup(c, tag, name, role="user", verified=False, password_hash=FAKE_HASH):
+async def signup(c, tag, name, admin_invite=False, verified=False, password_hash=FAKE_HASH):
     r = await c.post(
         "/dashboard/v1/users",
-        json={"email": f"{name}-{tag}@example.com", "passwordHash": password_hash, "role": role, "verified": verified},
+        json={"email": f"{name}-{tag}@example.com", "passwordHash": password_hash, "adminInvite": admin_invite, "verified": verified},
         headers=AUTH,
     )
     return r
@@ -111,7 +115,7 @@ async def test_signup_is_unique_per_email_ignoring_case(pg):
     assert body["id"] == a.json()["id"] and body["passwordHash"] == FAKE_HASH
     assert body["locked"] is False and body["disabled"] is False
     assert (await c.post("/dashboard/v1/users/lookup", json={"email": "nobody@example.com"}, headers=AUTH)).json() is None
-    assert (await signup(c, tag, "dave", role="admin", verified=True)).json()["verified"] is True
+    assert (await signup(c, tag, "dave", admin_invite=True)).json()["verified"] is True  # an admin starts verified
 
 
 @PG
@@ -222,7 +226,7 @@ async def test_disabling_a_user_hides_them_and_admins_cannot_be_disabled(pg):
     assert (await c.get(f"/dashboard/v1/users/{uid}", headers=AUTH)).status_code == 404
     await c.post(f"/dashboard/v1/users/{uid}/disabled", json={"disabled": False}, headers=AUTH)
     assert (await c.get(f"/dashboard/v1/users/{uid}", headers=AUTH)).status_code == 200
-    boss = (await signup(c, tag, "boss", role="admin")).json()["id"]
+    boss = (await signup(c, tag, "boss", admin_invite=True)).json()["id"]
     assert (await c.post(f"/dashboard/v1/users/{boss}/disabled", json={"disabled": True}, headers=AUTH)).status_code == 404
 
 

@@ -20,13 +20,13 @@ export async function POST(req: Request) {
   const code = String(form?.get("code") ?? "").slice(0, 200);
   await new Promise((r) => setTimeout(r, 400)); // the invite code is guessable only this fast
 
-  const decision = decideSignup(signupConfig(), email, code);
+  const decision = decideSignup(signupConfig(), code);
   if (!decision.ok) return back(decision.error);
   if (validateCredentials(email, password)) return back("invalid");
 
   let user;
   try {
-    user = await createUser(email, await hashPassword(password), decision.role, startsVerified(decision.role));
+    user = await createUser(email, await hashPassword(password), decision.adminInvite, startsVerified());
   } catch {
     return back("unavailable");
   }
