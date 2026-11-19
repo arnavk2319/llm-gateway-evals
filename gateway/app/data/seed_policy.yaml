@@ -21,6 +21,9 @@ providers:
     api_key_env_secondary: GROQ_API_KEY_2   # optional: rotation / failover
     requires_env: [GROQ_API_KEY]
   openrouter:
+    # Free-tier models are served by third parties that may log or train on prompts, so sensitive
+    # requests (see `safety` below) are never sent here. Verify the terms before changing this.
+    sensitive_ok: false
     kind: openai_compat
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
@@ -141,6 +144,19 @@ retry:
   deadline_s: 30
   per_attempt_timeout_s: 20
   first_token_timeout_s: 15
+
+# The safety gate: checked before a provider is called and again on the reply (replies are not checked when streamed).
+safety:
+  enabled: true
+  input:
+    secrets: redact      # block | redact | allow: API keys, private keys, connection strings
+    pii: sensitive       # sensitive | redact | block | allow: email, card number, SSN; "sensitive" limits the request to providers with sensitive_ok
+    injection: defang    # defang | warn | block | allow: override phrases, chat-template tokens and hidden characters become inert text (a heuristic)
+  output:
+    leaked_secrets: redact   # redact | fallback | allow
+    empty: fallback          # fallback | allow: a reply with no text and no tool call
+    markup: defang           # defang | allow: script-like HTML, javascript: links and auto-fetching images are made inert (code blocks are left alone)
+    tool_calls: declared_only  # declared_only | allow: a reply may only call tools the request declared
 
 llm_classify:
   enabled: false

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
-from .nodes import Deps, c_cand, c_conf, c_outcome, c_valid, make_timed_nodes
+from .nodes import Deps, c_cand, c_conf, c_guard, c_outcome, c_valid, make_timed_nodes
 from .state import GatewayState
 
 
@@ -14,7 +14,8 @@ def build_graph(deps: Deps):
         g.add_node(name, fn)  # type: ignore[call-overload]
 
     g.add_edge(START, "intake")
-    g.add_conditional_edges("intake", c_valid, {"profile": "profile", "respond_error": "respond_error"})
+    g.add_conditional_edges("intake", c_valid, {"guard": "guard", "respond_error": "respond_error"})
+    g.add_conditional_edges("guard", c_guard, {"profile": "profile", "respond_error": "respond_error"})
     g.add_conditional_edges("profile", c_conf, {"route": "route", "llm_classify": "llm_classify"})
     g.add_edge("llm_classify", "route")
     g.add_conditional_edges("route", c_cand, {"call": "call", "respond_error": "respond_error"})

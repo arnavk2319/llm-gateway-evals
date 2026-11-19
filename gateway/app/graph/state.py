@@ -33,6 +33,10 @@ class GatewayState(TypedDict, total=False):
     auth_method: str
     environment: str
 
+    # safety gate
+    sensitive: bool  # personal data present, or the caller said so: only eligible providers may see it
+    safety_notes: list[str]  # what the gate did, for the x-gateway-safety response header
+
     # policy
     policy: Policy
     policy_version: int

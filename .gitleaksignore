@@ -8,3 +8,6 @@ a3e9e7cb9303107c63a082b67bae5037d4536a1f:gateway/tests/test_auth.py:generic-api-
 
 # SHA-256 test vector (the hash of a made-up key) shared by the Python and TypeScript tests; not a credential.
 4e765f9ddfd4dc9db2582f13b0f95323cbd823a4:gateway/tests/test_accounts.py:generic-api-key:13
+
+# A PEM header/footer written as test input for the secret scanner (made-up key body); later commits assemble it at run time.
+f36ca5d19caba49747764acc9b303e4b34dfaad1:gateway/tests/test_safety.py:private-key:302

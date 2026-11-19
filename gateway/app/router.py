@@ -49,12 +49,15 @@ def select_route(
     env: Mapping[str, str] | None = None,
     allowed: set[str] | None = None,
     unhealthy: set[str] | None = None,
+    sensitive: bool = False,
 ) -> RouteDecision | None:
     """Pure routing function: capability filter, constraints, rank.
 
     `allowed` restricts candidates to the models a caller's key may use.
     `unhealthy` is the set of providers whose circuit is open; they are skipped
     unless that would leave no candidate.
+    `sensitive` restricts candidates to providers cleared for sensitive content. This is eligibility,
+    not preference: it is never relaxed, and it applies to a pinned model too.
 
     Returns None when no candidate is left.
     """
@@ -63,6 +66,8 @@ def select_route(
     avail = policy.available_models(env)
     if allowed is not None:
         avail = [m for m in avail if m.id in allowed]
+    if sensitive:
+        avail = [m for m in avail if policy.providers[m.provider].sensitive_ok]
 
     if pinned:
         spec = next((m for m in avail if m.id == pinned), None)
