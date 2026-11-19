@@ -24,7 +24,7 @@ export function gatewayConfig(env: Record<string, string | undefined> = process.
 const TIMEOUT_MS = 15_000; // leaves room for a scaled-to-zero gateway or database to wake up
 
 type Query = Record<string, string | number | null | undefined>;
-type Options = { method?: "GET" | "POST"; query?: Query; body?: unknown };
+type Options = { method?: "GET" | "POST" | "PATCH" | "DELETE"; query?: Query; body?: unknown };
 
 /** Call the gateway. Throws GatewayError for any failure; `status` is 0 when it could not be reached. */
 export async function gw<T>(path: string, { method = "GET", query, body }: Options = {}): Promise<T> {
