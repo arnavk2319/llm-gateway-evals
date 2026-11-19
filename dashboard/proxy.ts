@@ -4,7 +4,7 @@ import { authConfig, COOKIE, verifySession } from "@/lib/session";
 // Reachable without a session. Everything else needs a signed cookie; pages and API routes then
 // look the user up again, so a disabled account loses access immediately.
 const PUBLIC = [
-  "/login", "/signup", "/forgot", "/reset", "/verify",
+  "/", "/login", "/signup", "/forgot", "/reset", "/verify",
   "/api/login", "/api/signup", "/api/forgot", "/api/reset", "/api/verify",
 ];
 

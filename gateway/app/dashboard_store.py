@@ -372,8 +372,21 @@ class DashboardStore:
         policy = await self._one(
             "SELECT version, created_at FROM routing_policy WHERE status = 'active' ORDER BY version DESC LIMIT 1"
         )
+        # Bars for the overview chart: a minute for a one-hour window, an hour up to a week, else a day.
+        bucket = "minute" if hours <= 1 else "hour" if hours <= 168 else "day"
+        series = await self._all(
+            sql.SQL(
+                "SELECT date_trunc(%s, created_at) AS at, count(*)::int AS requests, "
+                "(count(*) FILTER (WHERE fell_back))::int AS fallbacks "
+                "FROM spans WHERE origin = 'external' AND created_at > now() - make_interval(hours => %s) {mine} "
+                "GROUP BY 1 ORDER BY 1"
+            ).format(mine=mine),
+            [bucket, hours, *mine_p],
+        )
         return {
             "hours": hours,
+            "bucket": bucket,
+            "series": [{"at": iso(r["at"]), "requests": r["requests"], "fallbacks": r["fallbacks"]} for r in series],
             "kpis": {
                 "requests": kpi["requests"], "errors": kpi["errors"], "fallbacks": kpi["fallbacks"],
                 "cost": float(kpi["cost"]), "shadow": float(kpi["shadow"]), "p50": _num(kpi["p50"]),

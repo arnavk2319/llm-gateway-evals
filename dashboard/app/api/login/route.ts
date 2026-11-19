@@ -38,7 +38,8 @@ export async function POST(req: Request) {
   }
   await recordSuccess(user.id).catch(() => undefined);
 
-  const res = NextResponse.redirect(new URL(next, req.url), 303);
+  // With no deeper link to return to, land on the overview rather than the public home page.
+  const res = NextResponse.redirect(new URL(next === "/" ? "/overview" : next, req.url), 303);
   const c = await sessionCookie(user.id, req);
   res.cookies.set(c.name, c.value, c.options);
   return res;

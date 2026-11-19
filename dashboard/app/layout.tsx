@@ -1,46 +1,22 @@
 import type { Metadata } from "next";
-import Link from "next/link";
-import { currentUser } from "@/lib/auth";
+import { familjen, hanken, plex } from "./fonts";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "LLM Gateway",
-  description: "Cost, latency, errors and routing for the LLM gateway",
+  title: { default: "Gateway", template: "%s · Gateway" },
+  description: "An OpenAI-compatible gateway that routes each call by role and task, with traces, cost and logs.",
 };
 
-export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const user = await currentUser();
+// Light is the default theme. A saved choice is applied before first paint so there is no flash.
+const THEME_SCRIPT = `try{var t=localStorage.getItem("gw-theme");if(t==="dark"||t==="light")document.documentElement.dataset.theme=t}catch(e){}`;
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body>
-        <nav className="sitenav">
-          {user ? (
-            <>
-              <Link href="/">Overview</Link>
-              <Link href="/logs">Logs</Link>
-              <Link href="/keys">API keys</Link>
-              <Link href="/account">Account</Link>
-              {user.role === "admin" ? <Link href="/admin/users">Users</Link> : null}
-              <a href="/api/export/spans?format=csv">Export calls</a>
-              <span className="muted" style={{ marginLeft: "auto" }}>{user.email}</span>
-              <form method="post" action="/api/logout">
-                <button type="submit" className="btn">Sign out</button>
-              </form>
-            </>
-          ) : (
-            <>
-              <Link href="/login" style={{ marginLeft: "auto" }}>Sign in</Link>
-              <Link href="/signup">Sign up</Link>
-            </>
-          )}
-        </nav>
-        {user && !user.verified ? (
-          <div role="status" className="banner">
-            Confirm your email address to create API keys. <Link href="/account">Open your account</Link>
-          </div>
-        ) : null}
-        {children}
-      </body>
+    <html lang="en" className={`${familjen.variable} ${hanken.variable} ${plex.variable}`} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+      </head>
+      <body>{children}</body>
     </html>
   );
 }
