@@ -31,11 +31,21 @@ def free_models() -> list[str]:
     )
 
 
-def probe(model: str, key: str, *, tools: bool) -> tuple[str, float, str]:
+def probe(model: str, key: str, *, tools: bool, attempts: int = 3) -> tuple[str, float, str]:
+    """Retry a temporary upstream rate limit a few times; a 429 says the endpoint exists, not that it is unusable."""
+    for n in range(attempts):
+        result = _probe_once(model, key, tools=tools)
+        if result[0] != "RATE LIMITED" or n == attempts - 1:
+            return result
+        time.sleep(8.0 * (n + 1))
+    return result
+
+
+def _probe_once(model: str, key: str, *, tools: bool) -> tuple[str, float, str]:
     body = {
         "model": model,
         "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
-        "max_tokens": 64,
+        "max_tokens": 400,  # reasoning models spend tokens thinking before they answer; 64 often returns nothing
         "provider": {"data_collection": "deny"},
     }
     if tools:
@@ -49,8 +59,12 @@ def probe(model: str, key: str, *, tools: bool) -> tuple[str, float, str]:
         with urllib.request.urlopen(req, timeout=60) as r:
             out = json.load(r)
         msg = (out.get("choices") or [{}])[0].get("message") or {}
-        got = (msg.get("content") or "").strip() or ("(tool call)" if msg.get("tool_calls") else "(empty)")
-        return "OK", time.perf_counter() - t0, got[:40]
+        got = (msg.get("content") or "").strip()
+        if got:
+            return "OK", time.perf_counter() - t0, got[:40]
+        if msg.get("tool_calls"):
+            return "OK", time.perf_counter() - t0, "(tool call)"
+        return "OK BUT EMPTY REPLY", time.perf_counter() - t0, "the router would treat this reply as empty and fall back"
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:160].replace("\n", " ")
         label = {404: "NO ENDPOINT under data_collection=deny", 429: "RATE LIMITED", 402: "NEEDS CREDITS"}.get(e.code, f"HTTP {e.code}")
@@ -68,9 +82,9 @@ def main(argv: list[str]) -> None:
     for m in models:
         result, secs, detail = probe(m, key, tools=False)
         tool = ""
-        if result == "OK":
+        if result.startswith("OK"):
             t_result, _, _ = probe(m, key, tools=True)
-            tool = "  tools:" + ("ok" if t_result == "OK" else t_result)
+            tool = "  tools:" + ("ok" if t_result.startswith("OK") else t_result)
         print(f"{m:52} {result:40} {secs:5.1f}  {detail}{tool}")
         time.sleep(1.0)  # be gentle with the free-tier rate limits
 

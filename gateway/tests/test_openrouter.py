@@ -36,7 +36,8 @@ def test_the_seed_policy_keeps_openrouter_private_and_free():
     models = [m for m in policy.models if m.provider == "openrouter"]
     assert models and all(m.free and m.price.input_per_1m == 0 and m.price.output_per_1m == 0 for m in models)
     assert all(m.model.endswith(":free") for m in models)
-    assert len({m.family for m in models}) >= 2  # reviewer independence needs more than one family
+    # Probed 2026-11-19: these have no endpoint that avoids training on prompts, so they must not come back unnoticed.
+    assert not [m for m in models if m.model.startswith(("nvidia/", "liquid/", "particle-ai/"))]
 
 
 # ---- through the gateway, with OpenRouter replaced by a fake -----------------------------------------------
