@@ -22,7 +22,17 @@ from ..providers.base import CallOutcome
 from ..providers.health import ProviderHealth
 from ..providers.registry import ProviderRegistry
 from ..router import select_route
-from ..safety import message_chars, redact, redact_messages, reply_is_empty, scan, scan_messages
+from ..safety import (
+    called_tool_names,
+    declared_tool_names,
+    defang_markup,
+    message_chars,
+    redact,
+    redact_messages,
+    reply_is_empty,
+    scan,
+    scan_messages,
+)
 from .state import GatewayState
 
 # Outcome classes the in-request feedback loop may retry on another model.
@@ -103,6 +113,12 @@ def _check_output(state: GatewayState, o: CallOutcome, notes: list[str]) -> str:
         return "empty_output"
     choices = body.get("choices")
     msg = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+    if rules.output.tool_calls == "declared_only" and isinstance(msg, dict):
+        called = called_tool_names(msg)
+        if called and not set(called) <= declared_tool_names(state["request"].model_extra or {}) | declared_tool_names(
+            {"tools": state["request"].tools}
+        ):
+            return "unsafe_output"  # the model asked for a tool the caller never offered: an injected instruction, or a bug
     leaks = (
         isinstance(msg, dict) and isinstance(msg.get("content"), str)
         and rules.output.leaked_secrets != "allow" and bool(scan(msg["content"]).secrets)
@@ -112,6 +128,12 @@ def _check_output(state: GatewayState, o: CallOutcome, notes: list[str]) -> str:
             return "unsafe_output"
         msg["content"] = redact(msg["content"], secrets=True)
         notes.append("redacted:reply-secrets")
+    if rules.output.markup == "defang" and isinstance(msg, dict):
+        for field in ("content", "reasoning"):
+            if isinstance(msg.get(field), str):
+                msg[field], counts = defang_markup(msg[field])
+                if counts and "defanged:markup" not in notes:
+                    notes.append("defanged:markup")
     return "ok"
 
 
@@ -244,7 +266,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         sensitive = state["headers"].get("x-gateway-sensitivity", "").strip().lower() == "sensitive"
         if sensitive:
             notes.append("sensitive:requested")
-        redact_secrets = redact_pii = False
+        redact_secrets = redact_pii = defang = False
 
         def blocked(what: str, kinds: Any) -> dict[str, Any]:
             names = ", ".join(sorted(kinds)) or what
@@ -270,21 +292,25 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
             elif rules.pii == "sensitive":
                 sensitive = True
                 notes.append("sensitive:pii")
-        if found.injection:
+        if found.injection or found.hidden:
             if rules.injection == "block":
-                return blocked("a prompt-injection phrase", {"injection"})
-            if rules.injection == "warn":
+                return blocked("a prompt-injection phrase or hidden text", {"injection"})
+            if rules.injection == "defang":
+                defang = True
+                notes.append("defanged:injection")
+            elif rules.injection == "warn":
                 notes.append("flagged:injection")
         if found.any:
             logs.append(stamped(
                 state, "input_guard", "info", "safety gate acted on the request: " + (", ".join(notes) or "noted only"),
                 tags={"secret_kinds": ",".join(sorted(found.secrets)), "pii_kinds": ",".join(sorted(found.pii)),
-                      "injection": bool(found.injection), "sensitive": sensitive}))
-        if redact_secrets or redact_pii:
+                      "injection": bool(found.injection), "hidden_text": bool(found.hidden), "sensitive": sensitive}))
+        if redact_secrets or redact_pii or defang:
+            args = {"secrets": redact_secrets, "pii": redact_pii, "defang": defang}
             cleaned = (
-                await asyncio.to_thread(redact_messages, msgs, secrets=redact_secrets, pii=redact_pii)
+                await asyncio.to_thread(lambda: redact_messages(msgs, **args))
                 if message_chars(msgs) > LARGE_PROMPT_CHARS
-                else redact_messages(msgs, secrets=redact_secrets, pii=redact_pii)
+                else redact_messages(msgs, **args)
             )
             update["request"] = state["request"].model_copy(update={"messages": cleaned})
         update.update({"sensitive": sensitive, "safety_notes": notes, "log_events": state.get("log_events", []) + logs})

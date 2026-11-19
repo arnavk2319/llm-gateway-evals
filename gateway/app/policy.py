@@ -91,12 +91,16 @@ class Weights(BaseModel):
 class InputSafety(BaseModel):
     secrets: Literal["block", "redact", "allow"] = "redact"  # API keys, private keys, connection strings
     pii: Literal["sensitive", "redact", "block", "allow"] = "sensitive"  # email, card number, SSN
-    injection: Literal["warn", "block", "allow"] = "warn"  # known prompt-injection phrases (heuristic)
+    # defang: make override phrases, chat-template tokens and hidden characters inert text (default);
+    # warn: only note them; block: refuse the request; allow: do nothing. A heuristic, see app/safety.py.
+    injection: Literal["defang", "warn", "block", "allow"] = "defang"
 
 
 class OutputSafety(BaseModel):
     leaked_secrets: Literal["redact", "fallback", "allow"] = "redact"
     empty: Literal["fallback", "allow"] = "fallback"  # no text and no tool call
+    markup: Literal["defang", "allow"] = "defang"  # script-like HTML, javascript: links, auto-fetching images
+    tool_calls: Literal["declared_only", "allow"] = "declared_only"  # a reply may only call tools the request declared
 
 
 class Safety(BaseModel):

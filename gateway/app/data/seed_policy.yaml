@@ -151,10 +151,12 @@ safety:
   input:
     secrets: redact      # block | redact | allow: API keys, private keys, connection strings
     pii: sensitive       # sensitive | redact | block | allow: email, card number, SSN; "sensitive" limits the request to providers with sensitive_ok
-    injection: warn      # warn | block | allow: known prompt-injection phrases (a heuristic)
+    injection: defang    # defang | warn | block | allow: override phrases, chat-template tokens and hidden characters become inert text (a heuristic)
   output:
     leaked_secrets: redact   # redact | fallback | allow
     empty: fallback          # fallback | allow: a reply with no text and no tool call
+    markup: defang           # defang | allow: script-like HTML, javascript: links and auto-fetching images are made inert (code blocks are left alone)
+    tool_calls: declared_only  # declared_only | allow: a reply may only call tools the request declared
 
 llm_classify:
   enabled: false
