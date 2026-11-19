@@ -24,6 +24,7 @@ for _f in ENV_FILES:  # DATABASE_URL etc. from .env, like the gateway itself
     load_dotenv(_f)
 
 from app.policy import load_policy_file  # noqa: E402
+from app.policy_registry import publish_meta  # noqa: E402
 from app.sinks import PostgresSink  # noqa: E402
 
 
@@ -39,6 +40,7 @@ async def main(path: str) -> None:
         version = await sink.save_policy(
             policy.model_dump(mode="json"), status="active", created_by="push_policy",
             parent_version=current[0] if current else None,
+            meta=publish_meta(policy, "push_policy"),
         )
         print(f"published policy version {version} (parent {current[0] if current else None})")
     finally:

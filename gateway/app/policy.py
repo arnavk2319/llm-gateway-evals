@@ -143,13 +143,44 @@ class PolicyStore:
     async def startup(self) -> None:
         try:
             row = await self._sink.load_active_policy()
-            if row is None and getattr(self._sink, "persists_policy", False):
-                await self._sink.save_policy(
-                    self._file_policy.model_dump(mode="json"), status="active", created_by="seed"
-                )
+            if getattr(self._sink, "persists_policy", False):
+                if row is None:
+                    await self._publish_file(None, "seed")
+                else:
+                    await self._sync_file(row[0], row[1])
         except Exception:
-            log.exception("policy seed failed; serving file policy")
+            log.exception("policy seed/sync failed; serving the stored policy")
         await self.get(force=True)
+
+    async def _publish_file(self, parent: int | None, source: str) -> int:
+        from .policy_registry import publish_meta
+
+        return int(
+            await self._sink.save_policy(
+                self._file_policy.model_dump(mode="json"), status="active", created_by=source,
+                parent_version=parent, meta=publish_meta(self._file_policy, source),
+                if_active_is=parent,
+            )
+        )
+
+    async def _sync_file(self, active_version: int, active_body: dict[str, Any]) -> None:
+        """Publish the policy file as a new version when its routing content differs from the active one.
+
+        A deploy that adds or removes a model therefore needs no manual step. A version that someone published
+        on purpose (API, control plane) is never replaced this way."""
+        from .policy_registry import AUTO_SOURCES, fingerprint
+
+        if fingerprint(Policy.model_validate(active_body)) == fingerprint(self._file_policy):
+            return
+        origin = await self._sink.active_policy_origin()
+        if origin is not None and origin[1] not in AUTO_SOURCES:
+            log.warning(
+                "policy file differs from active version %s, which was published by %r; not replacing it",
+                origin[0], origin[1],
+            )
+            return
+        new = await self._publish_file(active_version, "file_sync")
+        log.info("policy file changed: active version is now %s (was %s)", new, active_version)
 
     async def get(self, force: bool = False) -> Policy:
         now = time.monotonic()
