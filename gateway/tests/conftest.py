@@ -34,7 +34,7 @@ def seed_policy_dict() -> dict[str, Any]:
 async def make_gateway(sink_obj: Any = None, **overrides: Any):
     sink = sink_obj or MemorySink()
     # dashboard_token=None: a developer's local .env must not switch the dashboard API on in tests.
-    cfg = dict(mock_latency_scale=0.0, sink="memory", database_url=None, api_keys="", dashboard_token=None)
+    cfg = dict(mock_latency_scale=0.0, sink="memory", database_url=None, api_keys="", dashboard_token=None, balance_seed=0)
     cfg.update(overrides)
     app = create_app(Settings(**cfg), sink=sink)
     async with app.router.lifespan_context(app):

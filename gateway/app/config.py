@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     emit_inline: Literal["auto", "on", "off"] = "auto"
     max_request_bytes: int = 1_048_576  # larger request bodies are rejected with 413
     idempotency_ttl_s: int = 300
+    # Requests the whole process will work on at once. Beyond it, new requests get a quick 503 with Retry-After
+    # instead of queueing. 0 means no cap.
+    max_inflight: int = 256
+    balance_seed: int | None = None  # tests: make the choice among near-equal models reproducible
 
     # --- authentication
     # auto: required when keys/JWT secret are configured or when running on Vercel.

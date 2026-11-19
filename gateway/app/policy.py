@@ -56,6 +56,10 @@ class ProviderSpec(BaseModel):
     # Fields added to every request sent to this provider, for provider-specific controls (for OpenRouter,
     # `provider: {data_collection: deny}`). The policy wins: a caller cannot override these.
     request_extra: dict[str, Any] = Field(default_factory=dict)
+    # Limits this provider can take from us (per gateway instance). Unset means no limit of our own. A provider's
+    # published rate limit belongs here, so we slow down before it starts answering 429.
+    max_concurrency: int | None = Field(default=None, ge=1)
+    rpm_limit: int | None = Field(default=None, ge=1)
     # Provider is hidden when any of these env vars is set (e.g. disable mock).
     disabled_if_env: list[str] = Field(default_factory=list)
 
@@ -83,6 +87,10 @@ class RetryPolicy(BaseModel):
     # Backoff (with jitter) for in-place retries of a pinned model.
     backoff_base_s: float = 0.2
     backoff_max_s: float = 2.0
+    # Fallbacks and retries may use at most this fraction of ordinary traffic (plus a burst), so a failing source
+    # cannot multiply load on the next one. When it is spent, the request fails fast instead.
+    budget_ratio: float = Field(default=0.2, ge=0.0, le=1.0)
+    budget_burst: int = Field(default=10, ge=0)
 
 
 class Weights(BaseModel):
@@ -104,6 +112,16 @@ class OutputSafety(BaseModel):
     empty: Literal["fallback", "allow"] = "fallback"  # no text and no tool call
     markup: Literal["defang", "allow"] = "defang"  # script-like HTML, javascript: links, auto-fetching images
     tool_calls: Literal["declared_only", "allow"] = "declared_only"  # a reply may only call tools the request declared
+
+
+class Balance(BaseModel):
+    """How to spread traffic. Models whose score is within `margin` of the best share the load instead of the single
+    best one taking all of it."""
+
+    enabled: bool = True
+    margin: float = Field(default=0.02, ge=0.0)  # score units (about 0.04 quality points); 0 turns spreading off
+    load_aware: bool = True  # busier providers get a smaller share
+    diverse_fallback: bool = True  # the first fallback is on a different provider when there is one
 
 
 class Safety(BaseModel):
@@ -132,6 +150,7 @@ class Policy(BaseModel):
     retry: RetryPolicy = Field(default_factory=RetryPolicy)
     llm_classify: LLMClassify = Field(default_factory=LLMClassify)
     safety: Safety = Field(default_factory=Safety)
+    balance: Balance = Field(default_factory=Balance)
 
     def task_policy(self, task_type: str) -> TaskPolicy:
         return self.task_policies.get(task_type) or self.task_policies.get("default") or TaskPolicy()

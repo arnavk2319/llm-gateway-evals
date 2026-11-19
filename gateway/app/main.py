@@ -5,6 +5,7 @@ import contextlib
 import functools
 import json
 import logging
+import random
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -24,6 +25,7 @@ from .events import build_log_events, build_span_event
 from .graph.build import build_graph
 from .graph.nodes import Deps
 from .lineage import Lineage
+from .load import LoadTracker, RetryBudget
 from .policy import PolicyStore
 from .providers.health import ProviderHealth
 from .providers.registry import ProviderRegistry
@@ -190,6 +192,9 @@ def create_app(
             lineage=Lineage(sink_),
             auth=Authenticator(settings, sink_),
             health=ProviderHealth(),
+            load=LoadTracker(settings.max_inflight),
+            retry_budget=RetryBudget(),
+            rng=random.Random(settings.balance_seed) if settings.balance_seed is not None else None,  # noqa: S311
         )
         app.state.rt = Runtime(
             settings=settings, sink=sink_, policy_store=policy_store, graph=build_graph(deps), deps=deps
@@ -226,6 +231,12 @@ def create_app(
             rt: Runtime = request.app.state.rt
             return (await rt.policy_store.get()).model_dump(mode="json")
 
+        @app.get("/internal/load")
+        async def load_view(request: Request):
+            rt: Runtime = request.app.state.rt
+            return {**rt.deps.load.snapshot(), "retry_budget": {"tokens": round(rt.deps.retry_budget.tokens, 2),
+                                                                "denied": rt.deps.retry_budget.denied}}
+
         @app.get("/internal/events")
         async def recent_events(request: Request, limit: int = 50):
             rt: Runtime = request.app.state.rt
@@ -244,12 +255,36 @@ def create_app(
             if hit and hit[0] > time.monotonic():
                 return JSONResponse(hit[1], headers={**hit[2], "x-gateway-idempotent-replay": "true"})
 
+        # The whole process has a limit on requests it will work on at once. Past it a request is refused at once,
+        # with a hint when to retry, instead of queueing until everything is slow. A stream holds its place until
+        # it ends.
+        if not rt.deps.load.enter():
+            return JSONResponse(
+                {"error": {"message": "The gateway is at capacity. Retry shortly.", "type": "overloaded",
+                           "code": "overloaded"}},
+                status_code=503, headers={"Retry-After": "1"},
+            )
+        held = True
+
+        def release() -> None:
+            nonlocal held
+            if held:
+                held = False
+                rt.deps.load.leave()
+
         state: dict[str, Any] = {"request": req, "headers": headers, "origin": "external", "timings": {}}
         t0 = time.perf_counter()
-        final_state = await rt.graph.ainvoke(state, config={"recursion_limit": 60})
+        try:
+            final_state = await rt.graph.ainvoke(state, config={"recursion_limit": 60})
+        except BaseException:
+            release()
+            raise
         graph_ms = (time.perf_counter() - t0) * 1000
         final = final_state["final"]
         hdr = final["headers"]
+
+        if final["kind"] != "stream":
+            release()  # the response is built; writing it out does not count against the limit
 
         if final["kind"] == "json":
             usage, chars = _usage_from_body(final["body"])
@@ -278,6 +313,8 @@ def create_app(
                 await handle.aclose()
             except Exception:
                 log.exception("closing provider stream failed")
+            finally:
+                release()
             await _emit(
                 rt, final_state, graph_ms=graph_ms, usage=handle.usage,
                 completion_chars=handle.completion_chars,
