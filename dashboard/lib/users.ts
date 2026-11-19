@@ -17,9 +17,9 @@ export async function findActiveById(id: string): Promise<ActiveUser | null> {
   return r.ok ? r.data : null;
 }
 
-/** null when the email is already registered. */
-export async function createUser(email: string, passwordHash: string, role: Role, verified = false): Promise<User | null> {
-  const r = await gwOrStatus<User>("/users", { method: "POST", body: { email, passwordHash, role, verified } }, [409]);
+/** null when the email is already registered. `adminInvite` only reports the invite code; the gateway decides the role. */
+export async function createUser(email: string, passwordHash: string, adminInvite: boolean, verified = false): Promise<User | null> {
+  const r = await gwOrStatus<User>("/users", { method: "POST", body: { email, passwordHash, adminInvite, verified } }, [409]);
   return r.ok ? r.data : null;
 }
 

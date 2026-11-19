@@ -98,6 +98,7 @@ DATABASE_URL='<neon owner connection string>' uv run python scripts/migrate.py
 | gateway | `DATABASE_URL` | Neon **pooled** owner connection string (`-pooler` host, `?sslmode=require`) |
 | gateway | `GATEWAY_AUTH` | `required` |
 | gateway | `GATEWAY_DASHBOARD_TOKEN` | 32+ random characters; enables the dashboard API (`openssl rand -hex 32`) |
+| gateway | `GATEWAY_ADMIN_HASH_KEY`, `GATEWAY_ADMIN_EMAIL_HASHES` | who may be an admin: a secret key (32+ characters) and the keyed hashes of the admin addresses, made with `scripts/admin.py hash <email>`; unset means nobody is an admin |
 | gateway | `GATEWAY_ENVIRONMENT` | `production`, `dev`, ... (shown in Sentry) |
 | gateway | `SENTRY_DSN` | DSN of a Sentry project (optional) |
 | gateway | `GROQ_API_KEY`, `OPENROUTER_API_KEY` | provider keys (optional; the mock provider works without them) |
@@ -106,7 +107,6 @@ DATABASE_URL='<neon owner connection string>' uv run python scripts/migrate.py
 | dashboard | `GATEWAY_DASHBOARD_TOKEN` | the same value as on the gateway |
 | dashboard | `DASHBOARD_SESSION_SECRET` | 32+ random characters (`openssl rand -hex 32`) |
 | dashboard | `SIGNUP_INVITE_CODE` | 12+ characters; sign-up requires it (`SIGNUP_MODE=open` removes the requirement) |
-| dashboard | `ADMIN_EMAILS` | comma-separated addresses that become admins when they sign up with the code |
 | dashboard | `APP_URL` | the dashboard's public address, used in emailed links |
 | dashboard | `RESEND_API_KEY`, `EMAIL_FROM` | transactional email for address confirmation and password reset |
 | dashboard | `GATEWAY_PUBLIC_URL` | the gateway's public address, shown in the key page's code samples |

@@ -19,6 +19,7 @@ from typing import Any, Literal, LiteralString
 from psycopg import sql
 from psycopg.rows import dict_row
 
+from .admins import AdminAllowlist
 from .auth import generate_key, hash_key
 
 MAX_FAILURES = 5
@@ -64,8 +65,9 @@ def _scope(user_id: str | None, col: LiteralString = "user_id") -> tuple[sql.Com
 
 
 class DashboardStore:
-    def __init__(self, pool: Any) -> None:
+    def __init__(self, pool: Any, admins: AdminAllowlist | None = None) -> None:
         self._pool = pool
+        self._admins = admins or AdminAllowlist(None, None)  # no allowlist configured: nobody is an admin
 
     @asynccontextmanager
     async def _tx(self) -> AsyncIterator[Any]:
@@ -97,8 +99,8 @@ class DashboardStore:
         if not r:
             return None
         return {
-            "id": r["id"], "email": r["email"], "role": r["role"], "verified": r["verified"],
-            "passwordHash": r["password_hash"], "disabled": r["disabled"], "locked": r["locked"],
+            "id": r["id"], "email": r["email"], "role": self._admins.effective_role(r["role"], r["email"]),
+            "verified": r["verified"], "passwordHash": r["password_hash"], "disabled": r["disabled"], "locked": r["locked"],
         }
 
     async def find_active_by_id(self, user_id: str) -> dict[str, Any] | None:
@@ -110,12 +112,21 @@ class DashboardStore:
         if not r:
             return None
         return {
-            "id": r["id"], "email": r["email"], "role": r["role"], "verified": r["verified"],
-            "passwordChangedAt": int(r["password_changed_at"].timestamp() * 1000),
+            "id": r["id"], "email": r["email"], "role": self._admins.effective_role(r["role"], r["email"]),
+            "verified": r["verified"], "passwordChangedAt": int(r["password_changed_at"].timestamp() * 1000),
         }
 
-    async def create_user(self, email: str, password_hash: str, role: str, verified: bool) -> dict[str, Any] | None:
-        """None when the address is already registered (case-insensitive)."""
+    async def create_user(
+        self, email: str, password_hash: str, admin_invite: bool, verified: bool
+    ) -> dict[str, Any] | None:
+        """None when the address is already registered (case-insensitive).
+
+        The account becomes an admin only when the caller vouches that a valid admin invite was presented
+        AND this address is on the admin allowlist; anyone else is an ordinary user. An admin has proved
+        both, so starts verified.
+        """
+        role = "admin" if admin_invite and self._admins.allows(email) else "user"
+        verified = verified or role == "admin"
         user_id = "usr_" + secrets.token_hex(6)
         r = await self._one(
             "INSERT INTO users (id, email, password_hash, role, last_login_at, password_changed_at, "
@@ -151,7 +162,8 @@ class DashboardStore:
         )
         return [
             {
-                "id": r["id"], "email": r["email"], "role": r["role"], "disabled": r["disabled"],
+                "id": r["id"], "email": r["email"], "role": self._admins.effective_role(r["role"], r["email"]),
+                "disabled": r["disabled"],
                 "createdAt": iso(r["created_at"]), "lastLoginAt": iso(r["last_login_at"]),
                 "activeKeys": r["active_keys"], "calls24h": r["calls_24h"],
             }

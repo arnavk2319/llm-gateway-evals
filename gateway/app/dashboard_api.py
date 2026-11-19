@@ -48,8 +48,11 @@ class Lookup(_Body):
 class NewUser(_Body):
     email: str = Field(min_length=3, max_length=254)
     passwordHash: str = Field(min_length=20, max_length=300)
-    role: Literal["user", "admin"] = "user"
+    # True when the caller checked a valid admin invite code. Whether the address may be an admin is the
+    # gateway's decision (app/admins.py), never the caller's.
+    adminInvite: bool = False
     verified: bool = False
+    role: Literal["user", "admin"] | None = Field(default=None, deprecated=True)  # ignored: old dashboards still send it
 
 
 class Disabled(_Body):
@@ -144,7 +147,7 @@ def build_router(settings: Settings) -> APIRouter:
         return sink
 
     async def authorize(request: Request) -> DashboardStore:
-        return DashboardStore(_sink(request).pool)
+        return DashboardStore(_sink(request).pool, settings.admins)
 
     async def registry(request: Request) -> PolicyRegistry:
         return PolicyRegistry(_sink(request))
@@ -162,7 +165,7 @@ def build_router(settings: Settings) -> APIRouter:
 
     @router.post("/users")
     async def create_user(body: NewUser, store: DashboardStore = Depends(authorize)):
-        user = await store.create_user(body.email.strip().lower(), body.passwordHash, body.role, body.verified)
+        user = await store.create_user(body.email.strip().lower(), body.passwordHash, body.adminInvite, body.verified)
         if user is None:
             raise _error(409, "email already registered")
         return ok(user, 201)

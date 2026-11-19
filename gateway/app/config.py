@@ -7,6 +7,8 @@ from typing import Literal
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .admins import AdminAllowlist
+
 DATA_DIR = Path(__file__).parent / "data"
 GATEWAY_DIR = Path(__file__).resolve().parents[1]
 # Absolute so the gateway finds its env files regardless of the process's cwd.
@@ -55,6 +57,10 @@ class Settings(BaseSettings):
     key_max_per_user: int = 10  # active API keys one user may hold
     key_default_rpm: int = 60  # rate limit given to a key that does not ask for one
     key_max_rpm: int = 120  # the most a user may ask for
+    # Admins: HMAC-SHA256 digests of the admin addresses plus the secret key that makes them (see app/admins.py).
+    # Both unset means nobody is an admin. Make a digest with `scripts/admin.py hash <email>`.
+    admin_hash_key: str | None = None
+    admin_email_hashes: str | None = None
 
     # --- observability
     sentry_dsn: str | None = Field(
@@ -80,6 +86,10 @@ class Settings(BaseSettings):
     def debug_enabled(self) -> bool:
         """/internal/* endpoints expose the policy and raw events: local development only."""
         return self.debug_endpoints and not self.auth_required
+
+    @property
+    def admins(self) -> AdminAllowlist:
+        return AdminAllowlist(self.admin_hash_key, self.admin_email_hashes)
 
     @property
     def dashboard_api_enabled(self) -> bool:

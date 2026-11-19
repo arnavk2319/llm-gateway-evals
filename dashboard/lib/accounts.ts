@@ -3,7 +3,7 @@ import { safeEqual } from "./session.ts";
 import { PASSWORD_MAX, PASSWORD_MIN } from "./password.ts";
 
 export type SignupMode = "open" | "invite" | "closed";
-export type SignupConfig = { mode: SignupMode; inviteCode: string; adminEmails: string[]; production: boolean };
+export type SignupConfig = { mode: SignupMode; inviteCode: string; production: boolean };
 
 export function signupConfig(env: Record<string, string | undefined> = process.env): SignupConfig {
   const production = env.NODE_ENV === "production";
@@ -13,8 +13,7 @@ export function signupConfig(env: Record<string, string | undefined> = process.e
   // Production never opens by accident: without a mode, sign-up needs the invite code if one is set, else it is closed.
   const mode: SignupMode =
     asked === "open" || asked === "invite" || asked === "closed" ? asked : inviteCode ? "invite" : production ? "closed" : "open";
-  const adminEmails = (env.ADMIN_EMAILS ?? "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
-  return { mode, inviteCode, adminEmails, production };
+  return { mode, inviteCode, production };
 }
 
 /** A valid invite code. Local development with no code configured accepts anything. */
@@ -23,18 +22,18 @@ export function inviteOk(cfg: SignupConfig, supplied: string): boolean {
   return supplied.length > 0 && safeEqual(supplied.trim(), cfg.inviteCode);
 }
 
-export type SignupDecision = { ok: true; role: "user" | "admin" } | { ok: false; error: "closed" | "invite" };
+export type SignupDecision = { ok: true; adminInvite: boolean } | { ok: false; error: "closed" | "invite" };
 
 /**
- * Who may sign up, and as what. The admin role needs both an address on ADMIN_EMAILS and the
- * invite code, so someone who merely knows the admin's email can't claim it.
+ * Who may sign up. `adminInvite` says only that a valid invite code came with the request; whether the
+ * address may be an admin is decided by the gateway, from its allowlist of address hashes (it never
+ * trusts this flag on its own, and this app no longer knows who the admins are).
  */
-export function decideSignup(cfg: SignupConfig, email: string, code: string): SignupDecision {
+export function decideSignup(cfg: SignupConfig, code: string): SignupDecision {
   const codeOk = inviteOk(cfg, code);
-  const wantsAdmin = cfg.adminEmails.includes(email);
   if (cfg.mode === "closed") return { ok: false, error: "closed" };
   if (cfg.mode === "invite" && !codeOk) return { ok: false, error: "invite" };
-  return { ok: true, role: wantsAdmin && codeOk ? "admin" : "user" };
+  return { ok: true, adminInvite: codeOk };
 }
 
 const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,}$/;
@@ -53,8 +52,7 @@ export const verificationRequired = (env: Record<string, string | undefined> = p
   (env.REQUIRE_EMAIL_VERIFICATION ?? "").trim().toLowerCase() !== "false";
 
 /**
- * Admins already proved themselves with the invite code, so they start verified; everyone else
- * must confirm their address (unless verification is switched off).
+ * Everyone must confirm their address unless verification is switched off. (The gateway marks an admin
+ * verified itself, since an admin has already proved both the invite code and the address.)
  */
-export const startsVerified = (role: "user" | "admin", env: Record<string, string | undefined> = process.env): boolean =>
-  role === "admin" || !verificationRequired(env);
+export const startsVerified = (env: Record<string, string | undefined> = process.env): boolean => !verificationRequired(env);
