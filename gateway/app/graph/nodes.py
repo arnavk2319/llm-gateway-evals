@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import random
 import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
 from ..auth import Authenticator, AuthError
 from ..config import Settings
 from ..events import LogEvent, SpanEvent
 from ..lineage import Lineage
+from ..load import LoadTracker, RetryBudget
 from ..policy import PolicyStore
 from ..pricing import compute_cost
 from ..profile import COMPLEXITY, KNOWN_TASKS, TaskProfile, build_profile, last_user_text
@@ -38,7 +40,7 @@ from .state import GatewayState
 # Outcome classes the in-request feedback loop may retry on another model.
 RETRYABLE = frozenset(
     {"timeout", "rate_limit", "server_error", "connection", "malformed", "validator_failed", "auth_error",
-     "empty_output", "unsafe_output", "model_unavailable"}
+     "empty_output", "unsafe_output", "model_unavailable", "saturated"}
 )
 
 LARGE_PROMPT_CHARS = 50_000
@@ -54,6 +56,9 @@ class Deps:
     lineage: Lineage
     auth: Authenticator
     health: ProviderHealth
+    load: LoadTracker = field(default_factory=LoadTracker)
+    retry_budget: RetryBudget = field(default_factory=RetryBudget)
+    rng: random.Random | None = None
 
 
 def _err(status: int, type_: str, message: str, **extra: Any) -> dict[str, Any]:
@@ -247,6 +252,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
             update["api_key_name"] = principal.name
             update["api_key_id"] = principal.key_id
             update["user_id"] = principal.user_id
+        deps.retry_budget.deposit(policy.retry.budget_ratio, policy.retry.budget_burst)
         update["auth_method"] = principal.auth_method
         update["allowed_models"] = principal.allowed_models
 
@@ -402,25 +408,54 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
                 pass  # keep the rules profile
         return update
 
+    def overloaded(state: GatewayState, providers: set[str]) -> dict[str, Any]:
+        """Every source that could serve this is at a limit: say so quickly, with a hint when to come back."""
+        specs = state["policy"].providers
+        wait = max(1.0, min((deps.load.retry_after(p, specs[p]) for p in providers if p in specs), default=1.0))
+        deps.load.note_shed(providers)
+        return {"error": _err(
+            503, "overloaded", "All matching providers are at their capacity. Retry shortly.",
+            error_class="overloaded", headers={"Retry-After": str(math.ceil(wait))})}
+
     async def route(state: GatewayState) -> dict[str, Any]:
+        if state.get("retry_denied"):
+            attempts = state.get("attempts", [])
+            deps.load.note_shed(set())
+            return {"error": _err(
+                503, "overloaded", "Too many retries in flight; not falling back further right now.",
+                error_class="retry_budget_exhausted", headers={"Retry-After": "1"},
+                attempts=[{"model": a["model"], "outcome": a["outcome_class"]} for a in attempts])}
         parent = None
         if state.get("parent_call_id"):
             parent = await deps.lineage.get(str(state["parent_call_id"]))
         allowed = state.get("allowed_models")
-        decision = select_route(
-            state["policy"],
-            state["task_profile"],
-            node_role=state.get("node_role", "unknown"),
-            parent=parent,
-            excluded=set(state.get("excluded_models", [])),
-            escalate_tiers=state.get("escalate_tiers", 0),
-            pinned=state.get("pinned"),
-            stream=bool(state["request"].stream),
-            env=os.environ,
-            allowed=set(allowed) if allowed else None,
-            unhealthy=deps.health.open_providers(),
-            sensitive=bool(state.get("sensitive")),
-        )
+        providers = state["policy"].providers
+        saturated = deps.load.saturated(providers)
+        load = {name: deps.load.load_factor(name, spec) for name, spec in providers.items()}
+
+        def pick(**extra: Any) -> Any:
+            return select_route(
+                state["policy"],
+                state["task_profile"],
+                node_role=state.get("node_role", "unknown"),
+                parent=parent,
+                excluded=set(state.get("excluded_models", [])),
+                escalate_tiers=state.get("escalate_tiers", 0),
+                pinned=state.get("pinned"),
+                stream=bool(state["request"].stream),
+                env=os.environ,
+                allowed=set(allowed) if allowed else None,
+                unhealthy=deps.health.open_providers(),
+                sensitive=bool(state.get("sensitive")),
+                load=load,
+                rng=deps.rng,
+                **extra,
+            )
+
+        decision = pick(saturated=saturated)
+        if decision is None and saturated and pick() is not None:
+            # "Nothing fits" is a different answer from "something fits but every such provider is at its limit".
+            return overloaded(state, saturated)
         if decision is None and state.get("sensitive") and not state.get("attempts"):
             # Distinguish "nothing fits" from "something fits, but no provider is cleared to see this content".
             without = select_route(
@@ -435,6 +470,10 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
                     error_class="no_eligible_provider")}
         if decision is None:
             attempts = state.get("attempts", [])
+            if attempts and state.get("outcome_class") == "saturated":
+                # The last thing that stopped us was a provider at its limit, not a failure: answer "busy", not "broken".
+                last = next((a["provider"] for a in reversed(attempts) if a["outcome_class"] == "saturated"), None)
+                return overloaded(state, saturated or ({last} if last else set()))
             if attempts:
                 cls = state.get("outcome_class", "internal")
                 return {"error": _err(
@@ -459,6 +498,12 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         extra: dict[str, Any] = {}
         if deps.settings.mock_control_enabled:
             extra["mock_behavior"] = parse_mock_behavior(state["headers"].get("x-mock-behavior"))
+        # route() saw this provider with room, but another request may have taken it since: ask again and, if it is
+        # full now, treat the attempt as "saturated" so the request falls back instead of exceeding a limit.
+        slot = deps.load.acquire(sel.provider, policy.providers[sel.provider])
+        if slot is None:
+            return {"outcome": CallOutcome(ok=False, error_class="saturated",
+                                           error_message=f"{sel.provider} is at its concurrency or rate limit")}
         try:
             if req.stream:
                 outcome = await provider.open_stream(
@@ -468,6 +513,19 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
                 outcome = await provider.complete(sel, payload, timeout_s=timeout, extra=extra)
         except Exception as e:  # providers should not raise; never let one kill the request
             outcome = CallOutcome(ok=False, error_class="internal", error_message=repr(e)[:200])
+        if outcome.ok and outcome.stream is not None:
+            # A stream keeps its upstream connection until it closes, so the slot is held until then.
+            handle, original = outcome.stream, outcome.stream.closer
+
+            async def close_and_release() -> None:
+                try:
+                    await original()
+                finally:
+                    slot.release()
+
+            handle.closer = close_and_release
+        else:
+            slot.release()
         return {"outcome": outcome}
 
     async def evaluate(state: GatewayState) -> dict[str, Any]:
@@ -526,7 +584,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
             # Exclude what just failed; a rejected key takes the whole provider with it.
             doomed = (
                 [m.id for m in policy.models if m.provider == sel.provider]
-                if cls == "auth_error" else [sel.id]
+                if cls == "auth_error" else [] if cls == "saturated" else [sel.id]  # busy is not broken: keep it eligible
             )
             excluded.extend(m for m in doomed if m not in excluded)
         else:
@@ -542,7 +600,11 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
                 await asyncio.sleep(delay)
 
         esc = state.get("escalate_tiers", 0) + (1 if cls == "validator_failed" else 0)
-        return {"excluded_models": excluded, "escalate_tiers": esc}
+        # Each fallback or retry draws on a budget that refills with ordinary traffic; when it is empty the request
+        # fails fast instead of adding load to a source that is already struggling.
+        # A "saturated" attempt never reached the provider, so it added no load and costs nothing from the budget.
+        denied = cls != "saturated" and not deps.retry_budget.try_spend(policy.retry.budget_burst)
+        return {"excluded_models": excluded, "escalate_tiers": esc, "retry_denied": denied}
 
     async def respond(state: GatewayState) -> dict[str, Any]:
         o = cast(CallOutcome, state["outcome"])

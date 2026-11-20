@@ -42,6 +42,9 @@ class GatewayState(TypedDict, total=False):
     policy_version: int
     policy_status_served: str
 
+    # load
+    retry_denied: bool  # the retry budget was spent, so this request fails fast instead of falling back
+
     # decision
     task_profile: TaskProfile
     selected_route: RouteDecision

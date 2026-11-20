@@ -30,7 +30,8 @@ class MockProvider:
 
     Behaviors (per model id, or '*'): ok, error_500, error_429, timeout,
     malformed, bad_json, empty (a reply with no text), leak (a reply containing a key-shaped secret),
-    markup (a reply with script-like HTML and an image beacon), tool_call (a reply that calls an undeclared tool). Injection is only honored when the gateway allows it
+    markup (a reply with script-like HTML and an image beacon), tool_call (a reply that calls an undeclared tool),
+    slow_stream (a stream that takes about half a second, to test what is held while a stream is open). Injection is only honored when the gateway allows it
     (GATEWAY_ALLOW_MOCK_CONTROL).
     """
 
@@ -149,6 +150,8 @@ class MockProvider:
 
         async def gen() -> AsyncIterator[str]:
             for i, w in enumerate(words):
+                if behavior == "slow_stream":
+                    await asyncio.sleep(0.05)
                 yield chunk({"content": w + (" " if i < len(words) - 1 else "")})
             yield chunk({}, finish="stop")
             yield chunk({}, usage={"prompt_tokens": prompt_tokens, "completion_tokens": len(words),
