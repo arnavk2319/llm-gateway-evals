@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     # instead of queueing. 0 means no cap.
     max_inflight: int = 256
     balance_seed: int | None = None  # tests: make the choice among near-equal models reproducible
+    idempotency_max_entries: int = 1000  # recent responses kept for Idempotency-Key replays
+    # Requests one user (or one key, when it has no owner) may make per UTC day, counted in this process. 0 means no
+    # limit. A stopgap against one user using up a shared free-tier allowance; it resets when the instance restarts.
+    user_daily_requests: int = 0
+    docs_enabled: bool | None = None  # the interactive API docs; unset means on only when authentication is off
 
     # --- authentication
     # auto: required when keys/JWT secret are configured or when running on Vercel.
@@ -85,6 +90,11 @@ class Settings(BaseSettings):
     def mock_control_enabled(self) -> bool:
         """Callers may steer the mock provider with a header, but never on an authenticated gateway."""
         return self.allow_mock_control and (self.mock_control_with_auth or not self.auth_required)
+
+    @property
+    def docs_on(self) -> bool:
+        """/docs, /redoc and /openapi.json describe every route, so a public gateway does not serve them."""
+        return self.docs_enabled if self.docs_enabled is not None else not self.auth_required
 
     @property
     def debug_enabled(self) -> bool:

@@ -22,7 +22,7 @@ import math
 import secrets
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .config import Settings
@@ -151,6 +151,8 @@ class Authenticator:
         self._env_keys = {hash_key(k): name for k, name in settings.api_key_map.items()}
         self._cache: dict[str, tuple[float, dict[str, Any] | None, float]] = {}
         self._buckets: dict[str, tuple[float, float]] = {}
+        self._quota: dict[str, int] = {}
+        self._quota_day = ""
         self._touched: dict[str, float] = {}
         self._tasks: set[asyncio.Task] = set()
 
@@ -183,6 +185,7 @@ class Authenticator:
             principal = self._env_key(token)  # keys from GATEWAY_API_KEYS may have any shape
 
         self._check_rate(principal)
+        self._check_quota(principal)
         return principal
 
     def _env_key(self, token: str) -> Principal:
@@ -248,6 +251,33 @@ class Authenticator:
             await self._sink.touch_api_key(key_id)
         except Exception:  # last_used is best effort; never fail a request over it
             log.debug("touch_api_key failed", exc_info=True)
+
+    # -- daily quota (per user, counted in this process)
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(UTC)
+
+    def _check_quota(self, p: Principal) -> None:
+        """A user's requests per UTC day across all of their keys; unowned keys count on their own. A stopgap: the
+        counts live in this process, so they reset on restart and are per instance (see the production tickets)."""
+        limit = self._s.user_daily_requests
+        if limit <= 0:
+            return
+        now = self._now()
+        day = now.date().isoformat()
+        if day != self._quota_day:
+            self._quota_day, self._quota = day, {}
+        ident = p.user_id or p.key_id or p.name
+        used = self._quota.get(ident, 0)
+        if used >= limit:
+            midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            wait = max(1, math.ceil((midnight - now).total_seconds()))
+            raise AuthError(
+                429, "quota_exceeded", f"Daily limit of {limit} requests reached. It resets at 00:00 UTC.",
+                headers={"Retry-After": str(wait)}, error_class="quota_exceeded",
+            )
+        self._quota[ident] = used + 1
 
     # -- rate limiting (token bucket, per instance)
 
