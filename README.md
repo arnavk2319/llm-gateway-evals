@@ -102,6 +102,8 @@ DATABASE_URL='<neon owner connection string>' uv run python scripts/migrate.py
 | gateway | `GATEWAY_DASHBOARD_TOKEN` | 32+ random characters; enables the dashboard API (`openssl rand -hex 32`) |
 | gateway | `GATEWAY_ADMIN_HASH_KEY`, `GATEWAY_ADMIN_EMAIL_HASHES` | who may be an admin: a secret key (32+ characters) and the keyed hashes of the admin addresses, made with `scripts/admin.py hash <email>`; unset means nobody is an admin |
 | gateway | `GATEWAY_MAX_INFLIGHT` | requests one instance works on at once (default 256; 0 removes the cap); beyond it requests get a fast 503 with `Retry-After` |
+| gateway | `GATEWAY_USER_DAILY_REQUESTS` | requests one user may make per UTC day across all their keys, counted per instance (default 0: no limit); a stopgap against one user using a shared free-tier allowance |
+| gateway | `GATEWAY_DOCS_ENABLED` | serve `/docs` and `/openapi.json` (default: only when authentication is off) |
 | gateway | `GATEWAY_ENVIRONMENT` | `production`, `dev`, ... (shown in Sentry) |
 | gateway | `SENTRY_DSN` | DSN of a Sentry project (optional) |
 | gateway | `GROQ_API_KEY`, `OPENROUTER_API_KEY` | provider keys (optional; the mock provider works without them) |

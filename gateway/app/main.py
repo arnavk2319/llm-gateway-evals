@@ -18,12 +18,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 from . import observability
-from .auth import Authenticator
+from .auth import Authenticator, AuthError
 from .config import ENV_FILES, Settings
 from .dashboard_api import build_router as build_dashboard_router
 from .events import build_log_events, build_span_event
 from .graph.build import build_graph
 from .graph.nodes import Deps
+from .idempotency import IdempotencyCache, namespace
 from .lineage import Lineage
 from .load import LoadTracker, RetryBudget
 from .policy import PolicyStore
@@ -45,7 +46,7 @@ class Runtime:
     policy_store: PolicyStore
     graph: Any
     deps: Deps
-    idem: dict[str, tuple[float, dict, dict]] = field(default_factory=dict)
+    idem: IdempotencyCache = field(default_factory=lambda: IdempotencyCache(300.0, 1000))
     tasks: set[asyncio.Task] = field(default_factory=set)
 
 
@@ -197,13 +198,19 @@ def create_app(
             rng=random.Random(settings.balance_seed) if settings.balance_seed is not None else None,  # noqa: S311
         )
         app.state.rt = Runtime(
-            settings=settings, sink=sink_, policy_store=policy_store, graph=build_graph(deps), deps=deps
+            settings=settings, sink=sink_, policy_store=policy_store, graph=build_graph(deps), deps=deps,
+            idem=IdempotencyCache(settings.idempotency_ttl_s, settings.idempotency_max_entries),
         )
         yield
         await client.aclose()
         await sink_.close()
 
-    app = FastAPI(title="LLM Gateway", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="LLM Gateway", version="0.1.0", lifespan=lifespan,
+        docs_url="/docs" if settings.docs_on else None,
+        redoc_url="/redoc" if settings.docs_on else None,
+        openapi_url="/openapi.json" if settings.docs_on else None,
+    )
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_bytes)
     if settings.dashboard_api_enabled:  # off unless a 32+ character token is configured (ADR 0001)
         app.include_router(build_dashboard_router(settings))
@@ -250,10 +257,18 @@ def create_app(
         headers = {k.lower(): v for k, v in request.headers.items()}
 
         idem = headers.get("idempotency-key")
+        idem_ns = namespace(headers.get("authorization"))
         if idem and not req.stream:
-            hit = rt.idem.get(idem)
-            if hit and hit[0] > time.monotonic():
-                return JSONResponse(hit[1], headers={**hit[2], "x-gateway-idempotent-replay": "true"})
+            hit = rt.idem.get(idem_ns, idem)
+            if hit is not None:
+                # A replay skips the graph, so check the credential here: a key revoked since the original call, or
+                # one over its limits, must not be served from the cache.
+                try:
+                    await rt.deps.auth.authenticate(headers.get("authorization"))
+                except AuthError:
+                    hit = None
+            if hit is not None:
+                return JSONResponse(hit[0], headers={**hit[1], "x-gateway-idempotent-replay": "true"})
 
         # The whole process has a limit on requests it will work on at once. Past it a request is refused at once,
         # with a hint when to retry, instead of queueing until everything is slow. A stream holds its place until
@@ -289,7 +304,7 @@ def create_app(
         if final["kind"] == "json":
             usage, chars = _usage_from_body(final["body"])
             if idem:
-                rt.idem[idem] = (time.monotonic() + settings.idempotency_ttl_s, final["body"], hdr)
+                rt.idem.put(idem_ns, idem, final["body"], hdr)
             emit = functools.partial(_emit, rt, final_state, graph_ms=graph_ms, usage=usage,
                                      completion_chars=chars)
             if settings.emit_events_inline:
