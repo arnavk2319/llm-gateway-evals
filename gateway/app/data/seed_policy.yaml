@@ -15,14 +15,31 @@ providers:
     base_url: http://localhost:11434/v1
     requires_env: [OLLAMA_ENABLED]
   groq:
+    # Free-tier limits (30 requests and about 8,000 tokens per minute for gpt-oss; raise these on a paid plan). The
+    # token limit is not enforced here, so a few long prompts can still hit a 429, which the router handles by falling back.
+    max_concurrency: 16
+    rpm_limit: 30
     kind: openai_compat
     base_url: https://api.groq.com/openai/v1
     api_key_env: GROQ_API_KEY
+    api_key_env_secondary: GROQ_API_KEY_2   # optional: rotation / failover
     requires_env: [GROQ_API_KEY]
   openrouter:
+    # Free-tier models are served by third parties that may log or train on prompts, so sensitive
+    # requests (see `safety` below) are never sent here. Verify the terms before changing this.
+    sensitive_ok: false
+    # OpenRouter documents 20 requests per minute for all :free models together (and a daily cap that depends on credits
+    # bought), so the limit belongs to the provider, not to each model.
+    max_concurrency: 4
+    rpm_limit: 20
+    # Only endpoints OpenRouter classifies as not storing or training on prompts. A model with no such endpoint
+    # answers 404, which the router treats as "unavailable" and falls back. Check with scripts/probe_openrouter.py.
+    request_extra:
+      provider: {data_collection: deny}
     kind: openai_compat
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
+    api_key_env_secondary: OPENROUTER_API_KEY_2
     requires_env: [OPENROUTER_API_KEY]
 
 models:
@@ -76,36 +93,84 @@ models:
     price: {input_per_1m: 0.10, output_per_1m: 0.15}
     latency_ms_p50: 3000
     quality: {default: 0.65, code: 0.70}
-  - id: groq/llama-3.1-8b
+  # Groq: only the gpt-oss models are on this account's plan. Prices are list prices; verify on console.groq.com.
+  - id: groq/gpt-oss-20b
     provider: groq
-    model: llama-3.1-8b-instant
-    family: llama
-    tier: 1
+    model: openai/gpt-oss-20b
+    family: gpt-oss
+    tier: 2
     free: true
-    capabilities: {tools: true, json_mode: true, max_context: 32000}
-    price: {input_per_1m: 0.05, output_per_1m: 0.08}
-    latency_ms_p50: 250
-    quality: {default: 0.55, code: 0.50}
-  - id: groq/llama-3.3-70b
+    capabilities: {tools: true, json_mode: true, max_context: 131072}
+    price: {input_per_1m: 0.075, output_per_1m: 0.30}
+    latency_ms_p50: 400
+    quality: {default: 0.70, code: 0.68}
+  - id: groq/gpt-oss-120b
     provider: groq
-    model: llama-3.3-70b-versatile
-    family: llama
+    model: openai/gpt-oss-120b
+    family: gpt-oss
     tier: 3
     free: true
-    capabilities: {tools: true, json_mode: true, max_context: 32000}
-    price: {input_per_1m: 0.59, output_per_1m: 0.79}
-    latency_ms_p50: 600
-    quality: {default: 0.85, code: 0.84, review: 0.86}
-  - id: openrouter/qwen-2.5-72b
-    provider: openrouter
-    model: "qwen/qwen-2.5-72b-instruct:free"
+    capabilities: {tools: true, json_mode: true, max_context: 131072}
+    price: {input_per_1m: 0.15, output_per_1m: 0.75}
+    latency_ms_p50: 700
+    quality: {default: 0.85, code: 0.84, review: 0.85}
+  # Preview on Groq: it may be withdrawn at short notice, so it must never be the only model in its tier.
+  - id: groq/qwen3.8-27b
+    provider: groq
+    model: qwen/qwen3.8-27b
     family: qwen
+    tier: 2
+    free: true
+    capabilities: {tools: true, json_mode: true, max_context: 131072}
+    price: {input_per_1m: 0.80, output_per_1m: 4.00}
+    latency_ms_p50: 900
+    quality: {default: 0.78, code: 0.80, review: 0.78}
+  # OpenRouter free models: list price is zero, so billed and shadow cost are both 0. Probed 2026-11-19 with
+  # scripts/probe_openrouter.py under data_collection=deny: every Nvidia Nemotron free model, Liquid LFM 3 and Particle-1
+  # have no endpoint that avoids training, so they are left out. Ling 3.2 Flash and Cohere North Mini Code answered with
+  # tool support. Gemma 4 answered 429 on every retry (upstream capacity, so an endpoint exists but it is often busy; the
+  # router falls back). Baidu Ernie 5.5 Flash (a preview served from China) and Recursive Flint answered too and are
+  # left out until wanted. Re-run the probe before adding or keeping a model. Quality scores are estimates.
+  - id: openrouter/ling-3.2-flash
+    provider: openrouter
+    model: "inclusionai/ling-3.2-flash:free"
+    family: ling
+    tier: 2
+    free: true
+    capabilities: {tools: true, json_mode: true, max_context: 1048576}
+    price: {input_per_1m: 0.0, output_per_1m: 0.0}
+    latency_ms_p50: 1000
+    quality: {default: 0.68, code: 0.65}
+  - id: openrouter/north-mini-code
+    provider: openrouter
+    model: "cohere/north-mini-code:free"
+    family: cohere
+    tier: 2
+    free: true
+    capabilities: {tools: true, json_mode: false, max_context: 256000}
+    price: {input_per_1m: 0.0, output_per_1m: 0.0}
+    latency_ms_p50: 700
+    quality: {default: 0.62, code: 0.78, review: 0.72}
+  - id: openrouter/gemma-4-31b
+    provider: openrouter
+    model: "google/gemma-4-31b-it:free"
+    family: gemma
     tier: 3
     free: true
-    capabilities: {tools: true, json_mode: true, max_context: 32000}
-    price: {input_per_1m: 0.40, output_per_1m: 0.60}
+    capabilities: {tools: true, json_mode: true, max_context: 262144}
+    price: {input_per_1m: 0.0, output_per_1m: 0.0}
+    latency_ms_p50: 1500
+    quality: {default: 0.80, code: 0.78, review: 0.80}
+  - id: openrouter/gemma-4-26b
+    provider: openrouter
+    model: "google/gemma-4-26b-a4b-it:free"
+    family: gemma
+    tier: 2
+    free: true
+    capabilities: {tools: true, json_mode: true, max_context: 262144}
+    price: {input_per_1m: 0.0, output_per_1m: 0.0}
     latency_ms_p50: 1200
-    quality: {default: 0.84, code: 0.85, review: 0.85}
+    quality: {default: 0.72, code: 0.70}
 
 task_policies:
   default: {min_tier: 1}
@@ -122,11 +187,35 @@ role_constraints:
 
 weights: {cost: 0.30, latency: 0.15, quality: 0.55}
 
+# Spread traffic across models whose score is within `margin` of the best (about 0.04 quality points); busier providers
+# get a smaller share, and the first fallback is on a different provider when there is one.
+balance:
+  enabled: true
+  margin: 0.02
+  load_aware: true
+  diverse_fallback: true
+
 retry:
+  # Fallbacks and retries may use at most this fraction of ordinary traffic plus a burst; then requests fail fast.
+  budget_ratio: 0.2
+  budget_burst: 10
   max_attempts: 3
   deadline_s: 30
   per_attempt_timeout_s: 20
   first_token_timeout_s: 15
+
+# The safety gate: checked before a provider is called and again on the reply (replies are not checked when streamed).
+safety:
+  enabled: true
+  input:
+    secrets: redact      # block | redact | allow: API keys, private keys, connection strings
+    pii: sensitive       # sensitive | redact | block | allow: email, card number, SSN; "sensitive" limits the request to providers with sensitive_ok
+    injection: defang    # defang | warn | block | allow: override phrases, chat-template tokens and hidden characters become inert text (a heuristic)
+  output:
+    leaked_secrets: redact   # redact | fallback | allow
+    empty: fallback          # fallback | allow: a reply with no text and no tool call
+    markup: defang           # defang | allow: script-like HTML, javascript: links and auto-fetching images are made inert (code blocks are left alone)
+    tool_calls: declared_only  # declared_only | allow: a reply may only call tools the request declared
 
 llm_classify:
   enabled: false

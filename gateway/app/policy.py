@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -46,7 +47,19 @@ class ProviderSpec(BaseModel):
     kind: Literal["openai_compat", "mock"]
     base_url: str | None = None
     api_key_env: str | None = None
+    # Optional second key for zero-downtime rotation / failover on a 401 or 403.
+    api_key_env_secondary: str | None = None
     requires_env: list[str] = Field(default_factory=list)
+    # May this provider receive requests marked sensitive (personal data, or the caller said so)? Set it to
+    # false for sources that log or train on prompts, such as free tiers. Verify each provider's terms.
+    sensitive_ok: bool = True
+    # Fields added to every request sent to this provider, for provider-specific controls (for OpenRouter,
+    # `provider: {data_collection: deny}`). The policy wins: a caller cannot override these.
+    request_extra: dict[str, Any] = Field(default_factory=dict)
+    # Limits this provider can take from us (per gateway instance). Unset means no limit of our own. A provider's
+    # published rate limit belongs here, so we slow down before it starts answering 429.
+    max_concurrency: int | None = Field(default=None, ge=1)
+    rpm_limit: int | None = Field(default=None, ge=1)
     # Provider is hidden when any of these env vars is set (e.g. disable mock).
     disabled_if_env: list[str] = Field(default_factory=list)
 
@@ -71,12 +84,52 @@ class RetryPolicy(BaseModel):
     deadline_s: float = 30.0
     per_attempt_timeout_s: float = 20.0
     first_token_timeout_s: float = 15.0
+    # Backoff (with jitter) for in-place retries of a pinned model.
+    backoff_base_s: float = 0.2
+    backoff_max_s: float = 2.0
+    # Fallbacks and retries may use at most this fraction of ordinary traffic (plus a burst), so a failing source
+    # cannot multiply load on the next one. When it is spent, the request fails fast instead.
+    budget_ratio: float = Field(default=0.2, ge=0.0, le=1.0)
+    budget_burst: int = Field(default=10, ge=0)
 
 
 class Weights(BaseModel):
     cost: float = 0.3
     latency: float = 0.15
     quality: float = 0.55
+
+
+class InputSafety(BaseModel):
+    secrets: Literal["block", "redact", "allow"] = "redact"  # API keys, private keys, connection strings
+    pii: Literal["sensitive", "redact", "block", "allow"] = "sensitive"  # email, card number, SSN
+    # defang: make override phrases, chat-template tokens and hidden characters inert text (default);
+    # warn: only note them; block: refuse the request; allow: do nothing. A heuristic, see app/safety.py.
+    injection: Literal["defang", "warn", "block", "allow"] = "defang"
+
+
+class OutputSafety(BaseModel):
+    leaked_secrets: Literal["redact", "fallback", "allow"] = "redact"
+    empty: Literal["fallback", "allow"] = "fallback"  # no text and no tool call
+    markup: Literal["defang", "allow"] = "defang"  # script-like HTML, javascript: links, auto-fetching images
+    tool_calls: Literal["declared_only", "allow"] = "declared_only"  # a reply may only call tools the request declared
+
+
+class Balance(BaseModel):
+    """How to spread traffic. Models whose score is within `margin` of the best share the load instead of the single
+    best one taking all of it."""
+
+    enabled: bool = True
+    margin: float = Field(default=0.02, ge=0.0)  # score units (about 0.04 quality points); 0 turns spreading off
+    load_aware: bool = True  # busier providers get a smaller share
+    diverse_fallback: bool = True  # the first fallback is on a different provider when there is one
+
+
+class Safety(BaseModel):
+    """What the router checks before a call and on the reply. Not applied to streamed replies."""
+
+    enabled: bool = True
+    input: InputSafety = Field(default_factory=InputSafety)
+    output: OutputSafety = Field(default_factory=OutputSafety)
 
 
 class LLMClassify(BaseModel):
@@ -96,6 +149,8 @@ class Policy(BaseModel):
     weights: Weights = Field(default_factory=Weights)
     retry: RetryPolicy = Field(default_factory=RetryPolicy)
     llm_classify: LLMClassify = Field(default_factory=LLMClassify)
+    safety: Safety = Field(default_factory=Safety)
+    balance: Balance = Field(default_factory=Balance)
 
     def task_policy(self, task_type: str) -> TaskPolicy:
         return self.task_policies.get(task_type) or self.task_policies.get("default") or TaskPolicy()
@@ -137,13 +192,44 @@ class PolicyStore:
     async def startup(self) -> None:
         try:
             row = await self._sink.load_active_policy()
-            if row is None and getattr(self._sink, "persists_policy", False):
-                await self._sink.save_policy(
-                    self._file_policy.model_dump(mode="json"), status="active", created_by="seed"
-                )
+            if getattr(self._sink, "persists_policy", False):
+                if row is None:
+                    await self._publish_file(None, "seed")
+                else:
+                    await self._sync_file(row[0], row[1])
         except Exception:
-            log.exception("policy seed failed; serving file policy")
+            log.exception("policy seed/sync failed; serving the stored policy")
         await self.get(force=True)
+
+    async def _publish_file(self, parent: int | None, source: str) -> int:
+        from .policy_registry import publish_meta
+
+        return int(
+            await self._sink.save_policy(
+                self._file_policy.model_dump(mode="json"), status="active", created_by=source,
+                parent_version=parent, meta=publish_meta(self._file_policy, source),
+                if_active_is=parent,
+            )
+        )
+
+    async def _sync_file(self, active_version: int, active_body: dict[str, Any]) -> None:
+        """Publish the policy file as a new version when its routing content differs from the active one.
+
+        A deploy that adds or removes a model therefore needs no manual step. A version that someone published
+        on purpose (API, control plane) is never replaced this way."""
+        from .policy_registry import AUTO_SOURCES, fingerprint
+
+        if fingerprint(Policy.model_validate(active_body)) == fingerprint(self._file_policy):
+            return
+        origin = await self._sink.active_policy_origin()
+        if origin is not None and origin[1] not in AUTO_SOURCES:
+            log.warning(
+                "policy file differs from active version %s, which was published by %r; not replacing it",
+                origin[0], origin[1],
+            )
+            return
+        new = await self._publish_file(active_version, "file_sync")
+        log.info("policy file changed: active version is now %s (was %s)", new, active_version)
 
     async def get(self, force: bool = False) -> Policy:
         now = time.monotonic()

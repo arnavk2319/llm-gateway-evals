@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .admins import AdminAllowlist
 
 DATA_DIR = Path(__file__).parent / "data"
 GATEWAY_DIR = Path(__file__).resolve().parents[1]
@@ -30,9 +33,91 @@ class Settings(BaseSettings):
     sink: Literal["auto", "memory", "postgres", "null"] = "auto"
     auto_migrate: bool = True
     allow_mock_control: bool = True
+    # Tests only: keep mock control when auth is required (never set this in a deployment).
+    mock_control_with_auth: bool = False
     mock_latency_scale: float = 0.05
     debug_endpoints: bool = True
+    # Write events before the response is returned. Serverless platforms may freeze the
+    # process once the response is sent, which would drop post-response writes. auto = on Vercel.
+    emit_inline: Literal["auto", "on", "off"] = "auto"
+    max_request_bytes: int = 1_048_576  # larger request bodies are rejected with 413
     idempotency_ttl_s: int = 300
+    # Requests the whole process will work on at once. Beyond it, new requests get a quick 503 with Retry-After
+    # instead of queueing. 0 means no cap.
+    max_inflight: int = 256
+    balance_seed: int | None = None  # tests: make the choice among near-equal models reproducible
+    idempotency_max_entries: int = 1000  # recent responses kept for Idempotency-Key replays
+    # Requests one user (or one key, when it has no owner) may make per UTC day, counted in this process. 0 means no
+    # limit. A stopgap against one user using up a shared free-tier allowance; it resets when the instance restarts.
+    user_daily_requests: int = 0
+    docs_enabled: bool | None = None  # the interactive API docs; unset means on only when authentication is off
+
+    # --- authentication
+    # auto: required when keys/JWT secret are configured or when running on Vercel.
+    auth: Literal["auto", "required", "off"] = "auto"
+    jwt_secret: str | None = None  # enables short-lived HS256 tokens minted by your backend
+    jwt_issuer: str | None = None
+    default_rate_limit_per_min: int = 0  # 0 = unlimited unless a key sets its own
+    auth_cache_ttl_s: float = 60.0  # how long a verified key is cached (bounds revocation lag)
+
+    # --- dashboard API (/dashboard/v1). The dashboard has no database access: it calls these routes
+    # with this shared secret. Unset means the routes are not mounted at all. See ADR 0001.
+    dashboard_token: str | None = None
+    key_max_per_user: int = 10  # active API keys one user may hold
+    key_default_rpm: int = 60  # rate limit given to a key that does not ask for one
+    key_max_rpm: int = 120  # the most a user may ask for
+    # Admins: HMAC-SHA256 digests of the admin addresses plus the secret key that makes them (see app/admins.py).
+    # Both unset means nobody is an admin. Make a digest with `scripts/admin.py hash <email>`.
+    admin_hash_key: str | None = None
+    admin_email_hashes: str | None = None
+
+    # --- observability
+    sentry_dsn: str | None = Field(
+        default=None, validation_alias=AliasChoices("SENTRY_DSN", "GATEWAY_SENTRY_DSN")
+    )
+    sentry_traces_sample_rate: float = 0.0
+    environment: str = Field(
+        default="local", validation_alias=AliasChoices("VERCEL_ENV", "GATEWAY_ENVIRONMENT")
+    )
+
+    @property
+    def emit_events_inline(self) -> bool:
+        if self.emit_inline == "auto":
+            return bool(os.environ.get("VERCEL"))
+        return self.emit_inline == "on"
+
+    @property
+    def mock_control_enabled(self) -> bool:
+        """Callers may steer the mock provider with a header, but never on an authenticated gateway."""
+        return self.allow_mock_control and (self.mock_control_with_auth or not self.auth_required)
+
+    @property
+    def docs_on(self) -> bool:
+        """/docs, /redoc and /openapi.json describe every route, so a public gateway does not serve them."""
+        return self.docs_enabled if self.docs_enabled is not None else not self.auth_required
+
+    @property
+    def debug_enabled(self) -> bool:
+        """/internal/* endpoints expose the policy and raw events: local development only."""
+        return self.debug_endpoints and not self.auth_required
+
+    @property
+    def admins(self) -> AdminAllowlist:
+        return AdminAllowlist(self.admin_hash_key, self.admin_email_hashes)
+
+    @property
+    def dashboard_api_enabled(self) -> bool:
+        """A short token is as good as none, so the dashboard API stays off until it is long enough."""
+        return bool(self.dashboard_token) and len(self.dashboard_token or "") >= 32
+
+    @property
+    def auth_required(self) -> bool:
+        if self.auth == "required":
+            return True
+        if self.auth == "off":
+            return False
+        hosted = os.environ.get("VERCEL") or os.environ.get("RENDER")  # a public deployment never runs open
+        return bool(self.api_keys or self.jwt_secret or hosted)
 
     @property
     def api_key_map(self) -> dict[str, str]:

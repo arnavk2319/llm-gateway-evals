@@ -1,0 +1,134 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CI: "true"
+  UV_FROZEN: "1" # fail if uv.lock is out of date
+
+jobs:
+  # Required check: gateway-lint
+  gateway-lint:
+    name: gateway-lint (ruff, mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults: { run: { working-directory: gateway } }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with: { enable-cache: true, cache-dependency-glob: gateway/uv.lock }
+      - run: uv sync
+      - run: uv run ruff check . # includes the bandit-derived security rules (S)
+      - run: uv run mypy
+
+  # Required check: gateway-tests
+  gateway-tests:
+    name: gateway-tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: { python: ["3.11", "3.12"] }
+    defaults: { run: { working-directory: gateway } }
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust # throwaway CI database, no password to leak
+          POSTGRES_DB: gateway_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d gateway_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://postgres@localhost:5432/gateway_test
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with: { enable-cache: true, cache-dependency-glob: gateway/uv.lock, python-version: "${{ matrix.python }}" }
+      - run: uv sync
+      - run: uv run pytest -q # all tests, including the Postgres integration tests
+
+  # Required check: security-tests. Hostile input, injection, request limits, auth hardening.
+  # Also part of gateway-tests; kept separate so a regression here is named in the PR checks.
+  security-tests:
+    name: security-tests (injection, limits, auth)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults: { run: { working-directory: gateway } }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with: { enable-cache: true, cache-dependency-glob: gateway/uv.lock }
+      - run: uv sync
+      - run: uv run pytest -q tests/test_security.py tests/test_auth.py tests/test_resilience.py
+
+  # Required check: boot-smoke. The real server starts hardened and answers correctly.
+  boot-smoke:
+    name: boot-smoke (auth required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults: { run: { working-directory: gateway } }
+    env:
+      GATEWAY_AUTH: required
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with: { enable-cache: false } # a running server would hold the cache lock open
+      - run: uv sync --no-dev
+      - name: Start the gateway
+        run: |
+          KEY="smoke-$(openssl rand -hex 16)" # random per run: nothing key-like is committed
+          echo "SMOKE_KEY=$KEY" >> "$GITHUB_ENV"
+          GATEWAY_API_KEYS="$KEY:ci" nohup uv run --no-dev uvicorn app.main:app --port 8000 > ../gateway.log 2>&1 &
+          for i in $(seq 1 30); do curl -fs localhost:8000/healthz >/dev/null && exit 0; sleep 1; done
+          cat ../gateway.log; exit 1
+      - name: Checks
+        run: |
+          body='{"messages":[{"role":"user","content":"hello"}]}'
+          code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          [ "$(code localhost:8000/v1/chat/completions -H 'content-type: application/json' -d "$body")" = 401 ]
+          [ "$(code localhost:8000/v1/chat/completions -H 'content-type: application/json' -H 'authorization: Bearer nope' -d "$body")" = 401 ]
+          [ "$(code localhost:8000/v1/chat/completions -H 'content-type: application/json' -H "authorization: Bearer $SMOKE_KEY" -d "$body")" = 200 ]
+          [ "$(code localhost:8000/internal/policy)" = 404 ]
+          head -c 2000000 /dev/zero | tr '\0' 'x' > big.txt
+          [ "$(code localhost:8000/v1/chat/completions -H 'content-type: application/json' -H "authorization: Bearer $SMOKE_KEY" --data-binary @big.txt)" = 413 ]
+      - if: failure()
+        run: cat ../gateway.log
+      - if: always()
+        run: pkill -f "uvicorn app.main" || true
+
+  # Required check: dashboard
+  dashboard:
+    name: dashboard (typecheck, tests, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults: { run: { working-directory: dashboard } }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build # needs no gateway or database: the dashboard talks to the gateway only at request time

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .nodes import Node, c_cand, c_conf, c_outcome, c_valid
+from .nodes import Node, c_cand, c_conf, c_guard, c_outcome, c_valid
 from .state import GatewayState
 
 
@@ -13,10 +13,14 @@ async def run_plain(nodes: dict[str, Node], state: GatewayState) -> dict[str, An
     """
 
     async def step(name: str) -> None:
-        state.update(await nodes[name](state))  # type: ignore[arg-type]
+        state.update(await nodes[name](state))  # type: ignore[typeddict-item]
 
     await step("intake")
     if c_valid(state) == "respond_error":
+        await step("respond_error")
+        return state  # type: ignore[return-value]
+    await step("guard")
+    if c_guard(state) == "respond_error":
         await step("respond_error")
         return state  # type: ignore[return-value]
     await step("profile")
